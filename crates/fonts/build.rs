@@ -55,8 +55,13 @@ fn craft_fonts(dir: &std::path::Path) -> Result<String, String> {
         let telugu = scripts.split(',').any(|s| s.trim() == "Telu");
         // And the Hebrew ones (small), for Hebrew text and Edit text on the web.
         let hebrew = scripts.split(',').any(|s| s.trim() == "Hebr");
-        let web_face =
-            (*family == "BIZ UDPGothic" && *style == "Regular") || arabic || telugu || hebrew || scripts.split(',').any(|s| s.trim() == "Thai");
+        let chinese = scripts.split(',').any(|s| s.trim() == "Hans");
+        let web_face = (*family == "BIZ UDPGothic" && *style == "Regular")
+            || chinese
+            || arabic
+            || telugu
+            || hebrew
+            || scripts.split(',').any(|s| s.trim() == "Thai");
         if wasm && !web_face {
             continue;
         }

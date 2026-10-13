@@ -487,12 +487,12 @@ mod tests {
     }
 
     #[test]
-    fn urls_follow_the_artcraft_scheme() {
+    fn upstream_promotion_links_are_not_registered_in_the_host_catalog() {
         assert_eq!(super::APP_PAGE, format!("{}/apps/{}", super::WEBSITE, super::APP));
         assert_eq!(super::GITHUB, format!("https://github.com/storytold/{}", super::APP));
         for l in super::LINKS {
             assert!(l.url.starts_with("https://"), "{}", l.url);
-            assert!(crate::commands::command(l.command).is_some(), "{} is a registered command", l.command);
+            assert!(crate::commands::command(l.command).is_none(), "{} must remain retired", l.command);
         }
     }
 

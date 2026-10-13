@@ -259,6 +259,10 @@ impl PdfCraftApp {
     }
 
     pub(crate) fn pick_files(&mut self, purpose: FilePurpose, multiple: bool) {
+        if let Some(host) = self.host_files_request.as_ref() {
+            host(purpose, multiple, self.file_request(purpose, Vec::new()));
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.pick(crate::pickers::PickFor::Files(purpose), files_picker(purpose), multiple);
         #[cfg(target_arch = "wasm32")]
@@ -286,6 +290,12 @@ impl PdfCraftApp {
                 }
             });
         }
+    }
+
+    /// Resume the original native picker request; its frozen target is checked on the next frame.
+    pub fn host_supply_files(&mut self, request: FileRequest, files: Vec<(String, Vec<u8>)>) -> Result<(), String> {
+        self.requests.lock().map_err(|_| "file request inbox unavailable".to_string())?.push(FileRequest { files, ..request });
+        Ok(())
     }
 
     /// Read the picked files and use them.

@@ -47,33 +47,27 @@ fn versions_compare_by_number() {
 }
 
 #[test]
-fn a_newer_release_is_offered_for_download() {
+fn pinned_host_build_does_not_offer_a_standalone_update() {
     let mut h = harness(Ok("v99.0.0"));
-    h.state_mut().execute("help.check_updates");
+    assert!(!h.state_mut().execute("help.check_updates"));
     settle(&mut h);
-    h.get_by_label_contains("PdfCraft 99.0.0 is available");
-    h.get_by_label("Download");
-    h.get_by_label("Later").click();
-    h.run_steps(3);
-    assert!(h.query_by_label_contains("is available").is_none(), "Later closes the dialog");
-}
-
-#[test]
-fn an_up_to_date_or_failed_check_says_so() {
-    let mut h = harness(Ok(concat!("v", env!("CARGO_PKG_VERSION"))));
-    h.state_mut().execute("help.check_updates");
-    settle(&mut h);
-    h.get_by_label_contains("is up to date");
+    assert!(h.query_by_label_contains("is available").is_none());
     assert!(h.query_by_label("Download").is_none());
-
-    let mut h = harness(Err("couldn't reach GitHub"));
-    h.state_mut().execute("help.check_updates");
-    settle(&mut h);
-    h.get_by_label_contains("Couldn't check for updates: couldn't reach GitHub");
 }
 
 #[test]
-fn nothing_is_asked_until_the_user_checks() {
+fn retired_update_command_does_not_surface_source_results() {
+    for answer in [Ok(concat!("v", env!("CARGO_PKG_VERSION"))), Err("couldn't reach GitHub")] {
+        let mut h = harness(answer);
+        assert!(!h.state_mut().execute("help.check_updates"));
+        settle(&mut h);
+        assert!(h.query_by_label_contains("is up to date").is_none());
+        assert!(h.query_by_label_contains("Couldn't check for updates").is_none());
+    }
+}
+
+#[test]
+fn legacy_startup_and_retired_commands_never_query_for_updates() {
     // No check at start (the owner's decision): the source is only called from the command.
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = calls.clone();
@@ -92,8 +86,8 @@ fn nothing_is_asked_until_the_user_checks() {
     settle(&mut h);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(h.query_by_label_contains("is available").is_none());
-    h.state_mut().execute("help.check_updates");
+    assert!(!h.state_mut().execute("help.check_updates"));
     settle(&mut h);
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    h.get_by_label_contains("PdfCraft 99.0.0 is available");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(h.query_by_label_contains("is available").is_none());
 }

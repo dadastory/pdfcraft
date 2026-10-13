@@ -3600,6 +3600,13 @@ impl Session {
         guard(|| write_full(&editor.cos, &opts)).map_err(EditError::Write)?.map(Arc::new).map_err(|e| EditError::Write(e.to_string()))
     }
 
+    /// Host publication may rename a cloud-bound document without inventing a filesystem path.
+    pub fn host_rename(&mut self, id: DocId, name: &str) {
+        if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) {
+            doc.name = name.to_owned();
+        }
+    }
+
     /// Record a successful save of `bytes` (to `path`, if any): rebase editing on the saved file
     /// so the next save appends only newer edits. Undo history is kept.
     pub fn mark_saved(&mut self, id: DocId, bytes: Arc<Vec<u8>>, path: Option<String>) -> Result<(), EditError> {

@@ -579,6 +579,22 @@ impl PdfCraftApp {
         let Some(id) = self.views.get(index).map(|v| v.id) else { return false };
         let Some(doc) = self.session.get(id) else { return false };
         let (name, path) = (doc.name.clone(), doc.path.clone());
+        if self.host_save_request.is_some() {
+            if !self.flatten_fill_sign_for_save(id) {
+                return false;
+            }
+            let Some(revision) = self.session.get(id).map(|d| d.edit_generation()) else {
+                return false;
+            };
+            let result = self.host_save_request.as_ref().map(|save| save(id, revision, matches!(target, SaveTarget::As)));
+            if let Some(Err(error)) = result {
+                self.notify_error(error);
+            } else {
+                self.host_pending_saves.insert((id.0, revision), Box::new(after));
+            }
+            return false;
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             let destination = match (target, path, &self.save_override) {
@@ -648,6 +664,21 @@ impl PdfCraftApp {
                     false
                 }
             }
+        }
+    }
+
+    /// Commit native input and the native save preference before capturing a host snapshot.
+    pub fn host_prepare_snapshot(&mut self, id: pdfcraft_engine::DocId) -> bool {
+        self.commit_typing_in(id) && self.flatten_fill_sign_for_save(id)
+    }
+
+    /// Run a pending native Save-then-close only after publication of that exact clean state.
+    pub fn host_finish_publication(&mut self, id: pdfcraft_engine::DocId, revision: u64) {
+        let after = self.host_pending_saves.remove(&(id.0, revision));
+        self.host_pending_saves.retain(|(document, saved), _| *document != id.0 || *saved > revision);
+        let clean = self.views.iter().position(|v| v.id == id).is_some_and(|i| !self.has_unsaved_work(i));
+        if clean && let Some(after) = after {
+            after(self);
         }
     }
 

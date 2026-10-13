@@ -153,6 +153,16 @@ impl Automation {
         Ok(target)
     }
 
+    /// Run the official helper on an existing UI Session. The live model is moved, never
+    /// cloned or re-imported; the empty placeholder cannot execute commands. The last-resort
+    /// guard restores ownership even if an untrusted document triggers a panic.
+    pub fn call_live(session: &mut Session, name: &str, args: &Value) -> Result<Vec<Content>> {
+        let mut tools = Self { session: std::mem::take(session), root: None, renderers: HashMap::new(), texts: HashMap::new() };
+        let result = pdfcraft_engine::guard(|| tools.call(name, args)).map_err(failed).and_then(|r| r);
+        *session = tools.session;
+        result
+    }
+
     /// Run the tool `name` with JSON `args` (an object; `null` means no arguments).
     pub fn call(&mut self, name: &str, args: &Value) -> Result<Vec<Content>> {
         let empty = json!({});

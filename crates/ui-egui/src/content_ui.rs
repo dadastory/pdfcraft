@@ -508,8 +508,25 @@ impl crate::PdfCraftApp {
         }
     }
 
+    fn host_pick_image(&mut self, reply: impl FnOnce(&mut Self, String, Vec<u8>) + 'static) -> bool {
+        let Some(host) = self.host_asset_request.as_ref() else {
+            return false;
+        };
+        let Some((_, id)) = self.active_ids() else {
+            return true;
+        };
+        let Some(revision) = self.session.get(id).map(|doc| doc.edit_generation()) else {
+            return true;
+        };
+        host(id, revision, Box::new(reply));
+        true
+    }
+
     /// Edit a PDF ▸ Add content ▸ Image: pick a file and place it in the middle of the current page.
     pub fn add_image_dialog(&mut self) {
+        if self.host_pick_image(|app, name, bytes| app.add_image(name, bytes)) {
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.pick_image(tl!("Choose an image"), |app, name, bytes| app.add_image(name, bytes));
         #[cfg(target_arch = "wasm32")]
@@ -518,6 +535,15 @@ impl crate::PdfCraftApp {
 
     /// Edit text & images ▸ Replace Image: pick a file to draw in a page image's place.
     pub(crate) fn replace_page_image_dialog(&mut self, page: usize, index: usize) {
+        if self.host_pick_image(move |app, name, bytes| {
+            app.apply_edit(Edit::EditPageImage {
+                page,
+                index,
+                change: pdfcraft_engine::ImageEdit::Replace { name, bytes: std::sync::Arc::new(bytes) },
+            });
+        }) {
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.pick_image(tl!("Replace image"), move |app, name, bytes| {
             app.apply_edit(Edit::EditPageImage {
@@ -577,6 +603,12 @@ impl crate::PdfCraftApp {
 
     /// Click an image field: pick a picture for it.
     pub fn choose_field_image(&mut self, name: &str) {
+        let field_name = name.to_owned();
+        if self.host_pick_image(move |app, _, bytes| {
+            app.apply_edit(Edit::SetFieldImage { name: field_name, image: std::sync::Arc::new(bytes) });
+        }) {
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let name = name.to_string();
@@ -590,6 +622,11 @@ impl crate::PdfCraftApp {
 
     /// Edit image ▸ Replace: pick a file for the selected image.
     pub fn replace_image_dialog(&mut self, page: usize, index: usize) {
+        if self.host_pick_image(move |app, name, bytes| {
+            app.apply_edit(Edit::ReplaceImage { page, index, name, bytes: std::sync::Arc::new(bytes) });
+        }) {
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.pick_image(tl!("Replace image"), move |app, name, bytes| {
             app.apply_edit(Edit::ReplaceImage { page, index, name, bytes: std::sync::Arc::new(bytes) });

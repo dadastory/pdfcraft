@@ -386,6 +386,13 @@ pub type OsEventsFn = Box<dyn FnMut() -> Vec<OsEvent>>;
 pub type HostSaveFn = Box<dyn Fn(&str, &[u8], bool) -> Result<(), String>>;
 
 /// Told every frame whether any tab has unsaved work, so a host page can warn before leaving.
+pub type HostAssetReply = Box<dyn FnOnce(&mut PdfCraftApp, String, Vec<u8>)>;
+pub type HostPublicationFn = Box<dyn Fn(DocId, u64, bool) -> Result<(), String>>;
+pub type HostFilesFn = Box<dyn Fn(files::FilePurpose, bool, files::FileRequest)>;
+pub type HostOpenedFn = Box<dyn Fn(DocId, &std::sync::Arc<Vec<u8>>)>;
+pub type HostAssetFn = Box<dyn Fn(DocId, u64, HostAssetReply)>;
+pub(crate) type HostSaveContinuation = Box<dyn FnOnce(&mut PdfCraftApp) + Send>;
+
 pub type HostDirtyFn = Box<dyn FnMut(bool)>;
 
 pub struct PasswordPrompt {
@@ -546,6 +553,13 @@ pub struct PdfCraftApp {
     pub os_events: Option<OsEventsFn>,
     /// Save delivers to the embedding page instead of downloading (web, see [`HostSaveFn`]).
     pub host_save: Option<HostSaveFn>,
+    /// SDK host owns publication, never acknowledging an asynchronous request as a save.
+    pub host_save_request: Option<HostPublicationFn>,
+    pub host_open_request: Option<Box<dyn FnMut()>>,
+    pub host_files_request: Option<HostFilesFn>,
+    pub host_opened: Option<HostOpenedFn>,
+    pub host_asset_request: Option<HostAssetFn>,
+    pub(crate) host_pending_saves: std::collections::BTreeMap<(u64, u64), HostSaveContinuation>,
     /// Reports unsaved work to the embedding page (web, see [`HostDirtyFn`]).
     pub host_dirty: Option<HostDirtyFn>,
     /// A pending "save changes?" question (closing a dirty tab or quitting).
@@ -857,6 +871,12 @@ impl PdfCraftApp {
             unsaved_flag: Default::default(),
             os_events: None,
             host_save: None,
+            host_save_request: None,
+            host_open_request: None,
+            host_files_request: None,
+            host_opened: None,
+            host_asset_request: None,
+            host_pending_saves: Default::default(),
             host_dirty: None,
             close_request: None,
             save_override: None,
@@ -1020,6 +1040,21 @@ impl PdfCraftApp {
         self.open_bytes_with_focus(name, path, bytes, true)
     }
 
+    /// Open original PDF bytes supplied by the SDK; retains source identity through password prompts.
+    pub fn host_open_bytes(&mut self, name: &str, bytes: std::sync::Arc<Vec<u8>>) -> Result<(), String> {
+        self.startup_superseded = true;
+        if let Some(converted) = self.open_converted(name, &bytes) {
+            converted?;
+            if let Some((_, id)) = self.active_ids()
+                && let Some(opened) = self.host_opened.as_ref()
+            {
+                opened(id, &bytes);
+            }
+            return Ok(());
+        }
+        self.try_open(name, None, bytes, None, true)
+    }
+
     fn open_bytes_with_focus(&mut self, name: &str, path: Option<String>, bytes: Vec<u8>, activate: bool) -> Result<(), String> {
         // Images and text files become new, unsaved PDFs (Create a PDF).
         let active = self.active;
@@ -1062,6 +1097,9 @@ impl PdfCraftApp {
             Err(e) => return Err(e.to_string()),
         };
         self.password_prompt = None;
+        if let Some(opened) = self.host_opened.as_ref() {
+            opened(id, &bytes);
+        }
         // The reading-colours preference is app-wide: a newly opened document starts with it.
         // Idempotent: the engine returns `false` when the document has the setting already.
         self.session.set_reading_colors(id, self.reading_colors);
@@ -1408,6 +1446,10 @@ impl PdfCraftApp {
     }
 
     pub fn open_dialog(&mut self) {
+        if let Some(open) = self.host_open_request.as_mut() {
+            open();
+            return;
+        }
         self.startup_superseded = true;
         #[cfg(not(target_arch = "wasm32"))]
         self.pick(
@@ -1488,6 +1530,10 @@ impl PdfCraftApp {
     /// Open a web link in the system browser (a new tab on the web). Only for PdfCraft's own
     /// links; an address that came from a document goes through [`Self::request_document_url`].
     pub fn open_url(&mut self, url: &str) {
+        if self.host_open_request.is_some() {
+            self.notify_tr("External navigation is owned by the host");
+            return;
+        }
         if let Some(ctx) = &self.ctx {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
@@ -1499,6 +1545,10 @@ impl PdfCraftApp {
     /// (#90, #91). While one request is waiting, further ones are dropped, so a script can't
     /// queue up a stream of dialogs.
     pub fn request_document_url(&mut self, url: &str, origin: LinkOrigin) {
+        if self.host_open_request.is_some() {
+            self.notify_tr("External navigation is owned by the host");
+            return;
+        }
         match pdfcraft_engine::links::document_url(url) {
             Ok(url) => {
                 if self.pending_link.is_none() {
