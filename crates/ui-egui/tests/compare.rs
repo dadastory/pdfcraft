@@ -33,12 +33,131 @@ fn compare_two_versions() {
     let id = h.state().active_ids().unwrap().1;
     let i = h.state().active_ids().unwrap().0;
     assert_eq!(h.state().views[i].compare_marks.len(), 2);
+    // Side by side: the old file's half shades its side of the changes and follows the new
+    // file's zoom; "New file only" ends it.
+    assert!(h.state().compare.as_ref().unwrap().side_by_side, "side by side on a wide window");
+    let old_i = h.state().views.iter().position(|v| v.id == h.state().compare.as_ref().unwrap().old).unwrap();
+    assert_eq!(h.state().views[old_i].compare_marks.len(), 2, "replaced words shaded on the old file too");
+    assert!(h.state().views[old_i].flash.is_some(), "the old half jumped to the change");
+    h.state_mut().views[i].zoom = 1.5;
+    h.state_mut().views[i].fit = pdfcraft_ui_egui::canvas::Fit::None;
+    h.run_steps(3);
+    assert_eq!((h.state().views[old_i].zoom, h.state().views[old_i].fit), (1.5, pdfcraft_ui_egui::canvas::Fit::None), "the old half follows");
+    h.get_by_label("New file only").click();
+    h.run_steps(2);
+    assert!(!h.state().compare.as_ref().unwrap().side_by_side);
+    h.get_by_label("Side by side").click();
+    h.run_steps(2);
+    assert!(h.state().compare.as_ref().unwrap().side_by_side);
+    h.get_by_label("New file only").click();
+    h.run_steps(2);
     h.get_by_label("Mark as comments").click();
     h.run_steps(3);
     assert_eq!(h.state().session.get(id).unwrap().info.annotations.len(), 2);
     h.get_by_label("Report…").click();
     h.run_steps(3);
     assert_eq!(h.state().session.get(h.state().active_ids().unwrap().1).unwrap().name, "Compare Report.pdf");
+}
+
+/// Two versions compared side by side (old `v1.pdf` left, new `v2.pdf` right).
+fn side_by_side() -> Harness<'static, PdfCraftApp> {
+    let s = Session::new();
+    let v1 = s.create_from_text("t", "Delivery within five days. Returns accepted.").unwrap().to_vec();
+    let v2 = s.create_from_text("t", "Delivery within three days. Returns accepted for a week.").unwrap().to_vec();
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("v1.pdf", None, v1.clone()).unwrap();
+        app.open_bytes("v2.pdf", None, v2.clone()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state_mut().execute("doc.compare"));
+    h.run_steps(2);
+    h.get_by_label("Compare").click();
+    h.run_steps(3);
+    assert!(h.state().compare.as_ref().unwrap().side_by_side);
+    h
+}
+
+/// #3915: a half that closes its own tab while it draws (its snapshot bar's Close sets
+/// `close_requested`) must not leave the frame indexing the closed tab. Either half.
+#[test]
+fn closing_either_half_of_a_side_by_side_comparison_keeps_the_app_running() {
+    for (half, name) in [(1, "v2.pdf"), (0, "v1.pdf")] {
+        let mut h = side_by_side();
+        let c = h.state().compare.as_ref().unwrap();
+        let id = if half == 1 { c.new } else { c.old };
+        let i = h.state().views.iter().position(|v| v.id == id).unwrap();
+        h.state_mut().views[i].close_requested = true;
+        h.run_steps(3);
+        let s = h.state();
+        assert_eq!(s.views.len(), 1, "the {name} tab closed");
+        assert!(s.views.iter().all(|v| v.id != id));
+    }
+}
+
+/// Two versions whose differences are of both kinds: a replaced word (text) and a rectangle
+/// drawn far below the text (visual only, no text change explains it).
+fn text_and_visual_versions() -> (Vec<u8>, Vec<u8>) {
+    let mut s = Session::new();
+    let v1 = s.create_from_text("t", "Delivery within five days. Returns accepted.").unwrap().to_vec();
+    let text = s.create_from_text("t", "Delivery within three days. Returns accepted.").unwrap();
+    let id = s.open("v2.pdf", None, text, None).unwrap();
+    let square = pdfcraft_engine::Shape::Rectangle { rect: [100.0, 80.0, 300.0, 200.0] };
+    let style = pdfcraft_engine::Style::default_for(&square);
+    let new = pdfcraft_engine::NewAnnotation { page: 0, shape: square, style, contents: String::new(), author: "Ada".into() };
+    s.apply(id, pdfcraft_engine::Edit::AddAnnotation(new)).unwrap();
+    (v1, s.save_bytes(id).unwrap().to_vec())
+}
+
+/// The Compare panel's Show: Text / Visual filter, on both halves: Text takes the text changes
+/// out of the list and the shading, Visual takes the visual differences (counted, never listed)
+/// out of the shading, and each brings them back.
+#[test]
+fn compare_filters_hide_text_or_visual_changes() {
+    let (v1, v2) = text_and_visual_versions();
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("v1.pdf", None, v1.clone()).unwrap();
+        app.open_bytes("v2.pdf", None, v2.clone()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    h.state_mut().compare_old = h.state().views.first().map(|v| v.id);
+    h.state_mut().run_compare();
+    h.run_steps(3);
+    let new_i = h.state().active_ids().unwrap().0;
+    let old_i = h.state().views.iter().position(|v| v.id == h.state().compare.as_ref().unwrap().old).unwrap();
+    // Visual differences are shaded orange (compare_ui::VISUAL), text changes in their kind's colour.
+    let visual = egui::Color32::from_rgb(0xF0, 0x8C, 0x1A);
+    let kinds = |h: &Harness<'_, PdfCraftApp>, i: usize| {
+        let marks = &h.state().views[i].compare_marks;
+        (marks.iter().filter(|m| m.2 != visual).count(), marks.iter().filter(|m| m.2 == visual).count())
+    };
+    let (text_new, visual_new) = kinds(&h, new_i);
+    let (text_old, visual_old) = kinds(&h, old_i);
+    assert!(text_new > 0 && visual_new > 0, "the fixture has both kinds on the new file: {text_new} text, {visual_new} visual");
+    assert!(text_old > 0 && visual_old > 0, "and on the old file: {text_old} text, {visual_old} visual");
+    h.get_by_label("\"five\" → \"three\"");
+
+    h.get_by_label("Text").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("\"five\" → \"three\"").is_none(), "text changes leave the list");
+    assert_eq!(kinds(&h, new_i), (0, visual_new), "and the new file's shading");
+    assert_eq!(kinds(&h, old_i), (0, visual_old), "and the old file's");
+
+    h.get_by_label("Visual").click();
+    h.run_steps(2);
+    assert_eq!(kinds(&h, new_i), (0, 0));
+    assert_eq!(kinds(&h, old_i), (0, 0));
+
+    h.get_by_label("Text").click();
+    h.run_steps(2);
+    h.get_by_label("\"five\" → \"three\"");
+    assert_eq!(kinds(&h, new_i), (text_new, 0), "text back, visual still hidden");
+    assert_eq!(kinds(&h, old_i), (text_old, 0));
 }
 
 /// Writes a screenshot of the Compare panel when PDFCRAFT_SHOT is set (for review).
@@ -78,6 +197,7 @@ fn pdfa_dialog_verifies_and_converts() {
     assert!(h.state_mut().execute("standards.pdfa"));
     h.run_steps(2);
     h.get_by_label("Declared conformance: none");
+    assert!(h.query_by_label("Remove PDF/A identification").is_none(), "nothing to remove yet");
     h.get_by_label("Verify").click();
     h.run_steps(3);
     h.get_by_label("The document has no XMP metadata");
@@ -88,6 +208,10 @@ fn pdfa_dialog_verifies_and_converts() {
     assert!(issues.iter().all(|i| !i.fixable), "{issues:?}");
     let id = h.state().active_ids().unwrap().1;
     assert_eq!(h.state().session.get(id).unwrap().can_undo(), Some("Save as PDF/A-2b"));
+    h.get_by_label("Remove PDF/A identification").click();
+    h.run_steps(3);
+    h.get_by_label("Declared conformance: none");
+    assert_eq!(h.state().session.get(id).unwrap().can_undo(), Some("Remove PDF/A identification"));
 }
 
 /// A one-page PDF whose XMP declares the given `pdfaid`/`pdfuaid` attributes.
