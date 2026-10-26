@@ -409,6 +409,19 @@ pub(super) fn rewrite_styled_block(
     if draft.len() > 4_000_000 {
         return Err(EditError::Invalid("the replacement text is too large".into()));
     }
+    if style.family.is_some_and(|(family, _, _)| matches!(family, crate::added::Family::Packaged(_)))
+        || style.ranges.iter().any(|range| range.family.is_some_and(|(family, _, _)| matches!(family, crate::added::Family::Packaged(_))))
+    {
+        return Err(EditError::Invalid("select packaged paragraph fonts by their font resource".into()));
+    }
+    if style.resource.as_deref().is_some_and(|r| r.starts_with("@packaged:"))
+        && (style.bold == Some(true) || style.family.is_some_and(|(_, bold, italic)| bold || italic))
+        || style.ranges.iter().any(|range| {
+            range.resource.as_deref().is_some_and(|r| r.starts_with("@packaged:")) && range.family.is_some_and(|(_, bold, italic)| bold || italic)
+        })
+    {
+        return Err(EditError::Invalid("the selected packaged face has no synthetic bold or italic style".into()));
+    }
     if draft == block.editor_text && *style == BlockStyle::default() {
         return Ok(LineEdit { substituted: None });
     }
@@ -500,6 +513,20 @@ pub(super) fn rewrite_styled_block(
     let p = page_dict(doc, page)?;
     let mut res = p.dict.get(b"Resources").and_then(|r| doc.resolve(r).as_dict().cloned()).unwrap_or_default();
     let mut fonts = res.get(b"Font").and_then(|r| doc.resolve(r).as_dict().cloned()).unwrap_or_default();
+    let mut packaged_text = std::collections::BTreeMap::<String, String>::new();
+    if let Some(resource) = style.resource.as_ref().filter(|r| r.starts_with("@packaged:")) {
+        packaged_text.insert(resource.clone(), draft.to_owned());
+    }
+    for range in &style.ranges {
+        if let Some(resource) = range.resource.as_ref().filter(|r| r.starts_with("@packaged:")) {
+            packaged_text.entry(resource.clone()).or_default().push_str(draft.get(range.range.clone()).unwrap_or_default());
+        }
+    }
+    let mut packaged_resources = std::collections::BTreeMap::new();
+    for (resource, text) in packaged_text {
+        let actual = pdfcraft_fonts::embedding::embed_packaged_text(doc, &mut fonts, &resource, &text).map_err(EditError::Invalid)?;
+        packaged_resources.insert(resource, actual);
+    }
     for line in lines.iter().filter(|line| line.font.starts_with("PCRange")) {
         let mut f = Dict::new();
         f.set(b"Type".to_vec(), Object::name("Font"));
@@ -554,6 +581,7 @@ pub(super) fn rewrite_styled_block(
             }
             let s = ch.to_string();
             let name = if let Some(resource) = overrides.get(&index).and_then(|r| r.resource.as_ref()).or(style.resource.as_ref()) {
+                let resource = packaged_resources.get(resource).unwrap_or(resource);
                 if !metrics.get(resource).is_some_and(|m| source_encodes(m, &s)) {
                     return Err(EditError::Invalid(format!("the selected font resource {resource} cannot show U+{:04X}", u32::from(ch))));
                 }
@@ -571,7 +599,10 @@ pub(super) fn rewrite_styled_block(
                 if let Some(name) = full_faces.get(&key) {
                     name.clone()
                 } else {
-                    let name = pdfcraft_fonts::embedding::embed(doc, &mut fonts, face.bytes, face.family).map_err(EditError::Invalid)?;
+                    let text: String = draft.chars().filter(|c| pdfcraft_fonts::embedding::covers(face.bytes, &c.to_string())).collect();
+                    let name =
+                        pdfcraft_fonts::embedding::embed_packaged_text(doc, &mut fonts, &pdfcraft_fonts::embedding::packaged_resource(face), &text)
+                            .map_err(EditError::Invalid)?;
                     let font = fonts
                         .get(name.as_bytes())
                         .and_then(|f| doc.dict(f))
@@ -593,7 +624,13 @@ pub(super) fn rewrite_styled_block(
                     name.clone()
                 } else {
                     let family = pdfcraft_fonts::embedding::names(&bytes).map_or_else(|_| source.base_font.clone(), |(family, _)| family);
-                    let name = pdfcraft_fonts::embedding::embed(doc, &mut fonts, &bytes, &family).map_err(EditError::Invalid)?;
+                    let name = if let Some(face) = pdfcraft_fonts::embedding::packaged_font(&bytes) {
+                        let text: String = draft.chars().filter(|c| pdfcraft_fonts::embedding::covers(face.bytes, &c.to_string())).collect();
+                        pdfcraft_fonts::embedding::embed_packaged_text(doc, &mut fonts, &pdfcraft_fonts::embedding::packaged_resource(face), &text)
+                    } else {
+                        pdfcraft_fonts::embedding::embed(doc, &mut fonts, &bytes, &family)
+                    }
+                    .map_err(EditError::Invalid)?;
                     let font = fonts
                         .get(name.as_bytes())
                         .and_then(|f| doc.dict(f))

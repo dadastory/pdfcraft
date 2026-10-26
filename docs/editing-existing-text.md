@@ -119,3 +119,23 @@ them, a page of an affected document is refused until it is listed again, instea
 numbers as positions. Without a listing, a number is a position in the page's current
 paragraphs, as before. The inline editor holds the paragraph a switching click asked for the
 same way. What is still missing is an identity that survives save and reopen (design: #2508).
+
+
+## Packaged document fonts in the FlashYun build
+
+The reviewed `CRAFT_FONTS_DIR` input also supplies selectable document faces. Font
+menus and `text_fonts` list their family/style identities without copying their
+programs into the menu. Existing paragraph tools accept the returned
+`@packaged:<family> <style>` resource; `page_add_text` and `content_update` accept
+that resource or its family. Added text records the stable family/style identity
+in its PDF metadata, rather than a build-specific catalog index.
+
+This path authorizes only byte-for-byte matches of the immutable build input.
+External font import retains its separate 16 MiB, embedding-permission and
+license-declaration admission checks. Packaged input still requires valid SFNT
+table boundaries, static outlines, metrics and glyph references. Export maps the
+characters used by the current text with the existing 65,534 CID limit and retains
+the complete original font program, reusing it across resources. Above-16-MiB
+program reads are bounded by the largest actual packaged face and accepted only
+on an exact byte match. The selected regular faces do not synthesize bold or
+italic; these controls are disabled and tool requests for them are rejected.

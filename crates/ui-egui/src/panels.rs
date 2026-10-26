@@ -523,7 +523,7 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     {
         use crate::format_text_ui::{FontChoice, Fonts};
         let mut ed = ed;
-        let sources: Vec<(String, String)> = app
+        let mut sources: Vec<(String, String)> = app
             .session
             .get(app.views[i].id)
             .map(|d| d.text_editor_fonts(ed.page))
@@ -531,6 +531,7 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             .into_iter()
             .map(|f| (f.resource, f.face))
             .collect();
+        sources.extend(pdfcraft_fonts::CRAFT_FONTS.iter().map(|face| (pdfcraft_fonts::embedding::packaged_resource(face), face.name())));
         let shown = ed.font_shown(&sources);
         let out = crate::format_text_ui::panel(ui, t, &mut ed.look, Some(&mut ed.extras), Fonts { sources: Some(&sources), shown });
         let mut changed = out.changed;
@@ -540,6 +541,10 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
                 changed = true;
             }
             Some(FontChoice::Resource(resource)) => {
+                if pdfcraft_fonts::embedding::packaged_resource_font(&resource).is_some() {
+                    ed.look.bold = false;
+                    ed.look.italic = false;
+                }
                 ed.font_resource = Some(resource);
                 changed = true;
             }
@@ -615,6 +620,10 @@ fn added_text_format(ui: &mut egui::Ui, t: &Tokens, style: &mut pdfcraft_engine:
     let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown });
     if let Some(crate::format_text_ui::FontChoice::Family(family)) = out.font {
         style.family = family;
+        if matches!(family, pdfcraft_engine::FontFamily::Packaged(_)) {
+            style.bold = false;
+            style.italic = false;
+        }
     }
 }
 

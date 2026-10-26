@@ -99,7 +99,10 @@ pub fn embedded_sfnt(doc: &Document, font: &Dict) -> Option<Vec<u8>> {
         let Some(object) = descriptor.get(key) else { continue };
         let object = doc.resolve(object);
         let Object::Stream(stream) = object.as_ref() else { continue };
-        let Ok(mut bytes) = stream.decoded_within(16 << 20) else { continue };
+        let Ok(mut bytes) = stream.decoded_within(crate::embedding::program_read_limit()) else { continue };
+        if bytes.len() > 16 << 20 && crate::embedding::packaged_font(&bytes).is_none() {
+            continue;
+        }
         let Ok(face) = skrifa::FontRef::from_index(&bytes, 0) else { continue };
         if face.metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default()).units_per_em == 0 {
             continue;

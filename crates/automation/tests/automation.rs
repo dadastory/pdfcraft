@@ -8158,3 +8158,32 @@ fn comments_are_reshaped_through_the_tool() {
     assert!(a.call("comment_edit", &json!({ "doc": doc, "page": 1, "index": 1, "points": [[1, 2]] })).is_err(), "a line has two ends");
     assert!(matches!(a.call("comment_edit", &json!({ "doc": doc, "page": 1, "index": 1, "points": "no" })), Err(ToolError::InvalidArgs(_))));
 }
+
+#[test]
+fn packaged_fonts_are_discoverable_and_selectable_by_existing_content_tools() {
+    let Some(face) = pdfcraft_fonts::CRAFT_FONTS.first() else { return };
+    let dir = workdir("packaged-font-selection");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    let fonts = ok(&mut a, "text_fonts", json!({"doc":doc,"page":1}));
+    let packaged: Vec<_> = fonts["fonts"].as_array().unwrap().iter().filter(|f| f["packaged"] == true).collect();
+    assert_eq!(packaged.len(), pdfcraft_fonts::CRAFT_FONTS.len());
+    for (actual, expected) in packaged.iter().zip(pdfcraft_fonts::CRAFT_FONTS) {
+        assert_eq!(actual["resource"], pdfcraft_fonts::embedding::packaged_resource(expected));
+        assert_eq!(actual["font"], expected.family);
+        assert_eq!(actual["style"], expected.style);
+        assert_eq!(actual["preview_only"], false);
+    }
+    let resource = pdfcraft_fonts::embedding::packaged_resource(face);
+    ok(&mut a, "page_add_text", json!({"doc":doc,"page":1,"text":"中文新增","rect":[20,20,180,45],"font":resource}));
+    assert_eq!(ok(&mut a, "content_list", json!({"doc":doc}))["items"][0]["font"], face.family);
+    ok(&mut a, "content_update", json!({"doc":doc,"page":1,"index":1,"font":face.family,"text":"中文修改"}));
+    assert!(page_text(&mut a, doc)[0].contains("中文修改"));
+    assert!(a.call("content_update", &json!({"doc":doc,"page":1,"index":1,"bold":true})).is_err());
+    ok(&mut a, "doc_save", json!({"doc":doc,"path":"packaged.pdf"}));
+    let reopened = ok(&mut a, "doc_open", json!({"path":"packaged.pdf"}))["doc"].as_u64().unwrap();
+    let item = &ok(&mut a, "content_list", json!({"doc":reopened}))["items"][0];
+    assert_eq!(item["font"], face.family);
+    assert_eq!(item["text"], "中文修改");
+    std::fs::remove_dir_all(dir).unwrap();
+}

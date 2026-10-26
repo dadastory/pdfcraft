@@ -18,7 +18,22 @@ pub fn face_key(name: &str) -> String {
 /// Full, approved faces of the source family. This never silently selects another family.
 pub fn matching_faces(name: &str) -> Vec<&'static crate::CraftFont> {
     let key = face_key(name);
-    crate::CRAFT_FONTS.iter().filter(|f| face_key(f.family) == key || face_key(&f.name()) == key).collect()
+    // Cache only small name aliases. Several packaged Chinese faces have a
+    // PostScript name unrelated to their catalog family; their saved PDF uses it.
+    type FaceAliases = (&'static crate::CraftFont, Vec<String>);
+    static FACES: std::sync::LazyLock<Vec<FaceAliases>> = std::sync::LazyLock::new(|| {
+        crate::CRAFT_FONTS
+            .iter()
+            .map(|face| {
+                let mut aliases = vec![face_key(face.family), face_key(&face.name())];
+                if let Ok(font) = FontRef::new(face.bytes) {
+                    aliases.extend(font.localized_strings(skrifa::string::StringId::POSTSCRIPT_NAME).map(|name| face_key(&name.to_string())));
+                }
+                (face, aliases)
+            })
+            .collect()
+    });
+    FACES.iter().filter(|(_, aliases)| aliases.contains(&key)).map(|(face, _)| *face).collect()
 }
 
 /// Whether a complete font program can show every non-newline character.
@@ -47,6 +62,9 @@ pub fn names(bytes: &[u8]) -> Result<(String, String), String> {
 /// never turn a proprietary system-interface fallback into an exported PDF font.
 pub fn validate_document_input(bytes: &[u8]) -> Result<(), String> {
     use skrifa::string::StringId;
+    // File-picker/system-font inputs keep the upstream admission rules even if
+    // they happen to have the same family name as a packaged face.
+    validate_external(bytes)?;
     let (family, _) = names(bytes)?;
     let key = face_key(&family);
     if ["sourcehan", "sourceserif", "sourcesans", "notosanscjk", "notoserifcjk"].iter().any(|n| key.starts_with(n)) {
@@ -70,30 +88,108 @@ pub fn validate_document_input(bytes: &[u8]) -> Result<(), String> {
 
 /// Validate before allocating any PDF objects, so an invalid font cannot partly mutate a doc.
 pub fn validate(bytes: &[u8]) -> Result<(), String> {
+    if packaged_font(bytes).is_some() {
+        return validate_structure(bytes, true);
+    }
+    validate_external(bytes)
+}
+
+/// Only the exact immutable programs supplied by the reviewed build input have
+/// operator-authorized embedding. Names and PDF dictionary markers confer no trust.
+pub fn packaged_font(bytes: &[u8]) -> Option<&'static crate::CraftFont> {
+    crate::CRAFT_FONTS.iter().find(|face| face.bytes.len() == bytes.len() && face.bytes == bytes)
+}
+
+/// Bounded decode budget for a packaged program saved into a PDF. Programs above
+/// the ordinary 16 MiB budget must match the build input byte for byte afterwards.
+pub fn program_read_limit() -> usize {
+    crate::CRAFT_FONTS.iter().map(|face| face.bytes.len()).max().unwrap_or(0).max(16 << 20)
+}
+
+fn validate_external(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() > 16 << 20 {
         return Err("the selected font exceeds 16 MiB".into());
     }
+    validate_structure(bytes, false)
+}
+
+fn validate_structure(bytes: &[u8], packaged: bool) -> Result<(), String> {
     let font = FontRef::new(bytes).map_err(|_| "select a standalone TrueType/OpenType font (not a font collection)")?;
+    if font.table_directory().table_records().iter().any(|record| {
+        usize::try_from(record.offset())
+            .ok()
+            .zip(usize::try_from(record.length()).ok())
+            .and_then(|(offset, length)| offset.checked_add(length))
+            .is_none_or(|end| end > bytes.len())
+    }) {
+        return Err("the selected font has a table outside its program".into());
+    }
     if font.fvar().is_ok() {
         return Err("select a static instance of this variable font before embedding".into());
     }
     if (font.glyf().is_err() && font.cff().is_err()) || font.head().is_err() || font.hhea().is_err() || font.hmtx().is_err() {
         return Err("the selected font has no usable TrueType/CFF outlines and metrics".into());
     }
-    if font.os2().is_ok_and(|t| t.fs_type() & (0x0002 | 0x0004 | 0x0200) != 0) {
+    if !packaged && font.os2().is_ok_and(|t| t.fs_type() & (0x0002 | 0x0004 | 0x0200) != 0) {
         return Err("this font's embedding permissions prohibit editable outline embedding".into());
     }
     let m = font.metrics(Size::unscaled(), LocationRef::default());
     if m.units_per_em == 0 || font.charmap().mappings().next().is_none() {
         return Err("the selected font has no Unicode mapping or valid units per em".into());
     }
-    if font.charmap().mappings().take(65_535).count() >= 65_535 {
+    if !packaged && font.charmap().mappings().take(65_535).count() >= 65_535 {
         return Err("the selected font has too many Unicode mappings for one PDF font".into());
     }
     if font.charmap().mappings().any(|(_, g)| g.to_u32() >= u32::from(m.glyph_count)) {
         return Err("the selected font maps Unicode to a glyph outside its program".into());
     }
     Ok(())
+}
+
+/// Select a packaged face by its stable family/style identity, without copying
+/// any program into the menu or admitting bytes from an uploaded font.
+pub fn packaged_resource(face: &crate::CraftFont) -> String {
+    format!("@packaged:{}", face.name())
+}
+
+pub fn packaged_resource_font(resource: &str) -> Option<&'static crate::CraftFont> {
+    let name = resource.strip_prefix("@packaged:")?;
+    crate::CRAFT_FONTS.iter().find(|face| face.name() == name)
+}
+
+/// Use only the requested Unicode mappings, while retaining the original full
+/// program unchanged. The PDF CID/mapping limits in embed_mapping still apply.
+pub fn embed_packaged_text(doc: &mut Document, fonts: &mut Dict, resource: &str, text: &str) -> Result<String, String> {
+    let face = packaged_resource_font(resource).ok_or("the packaged font is not present in this build")?;
+    validate(face.bytes)?;
+    let font = FontRef::new(face.bytes).map_err(|e| e.to_string())?;
+    let chars: std::collections::BTreeSet<_> = text.chars().filter(|c| !matches!(c, '\n' | '\r')).collect();
+    if chars.len() > 65_534 {
+        return Err("selected text exceeds the PDF font mapping budget".into());
+    }
+    let mappings: Result<Vec<_>, String> = chars
+        .into_iter()
+        .map(|c| {
+            font.charmap()
+                .map(c)
+                .filter(|g| g.to_u32() != 0)
+                .map(|g| (c.to_string(), g))
+                .ok_or_else(|| format!("the packaged font cannot show U+{:04X}", u32::from(c)))
+        })
+        .collect();
+    let (_, postscript) = names(face.bytes)?;
+    embed_mapping(doc, fonts, face.bytes, &postscript, &mappings?)
+}
+
+pub fn packaged_width(face: &crate::CraftFont, text: &str, size: f64) -> f64 {
+    let Ok(font) = FontRef::new(face.bytes) else { return 0.0 };
+    let metrics = font.metrics(Size::unscaled(), LocationRef::default());
+    let advances = font.glyph_metrics(Size::unscaled(), LocationRef::default());
+    text.chars()
+        .filter_map(|c| font.charmap().map(c))
+        .filter_map(|glyph| advances.advance_width(glyph))
+        .map(|width| f64::from(width) * size / f64::from(metrics.units_per_em.max(1)))
+        .sum()
 }
 
 fn stream(doc: &mut Document, bytes: Vec<u8>) -> Object {
@@ -275,7 +371,7 @@ impl Written {
 fn is_program(doc: &Document, s: &Stream, bytes: &[u8]) -> bool {
     s.dict.get(b"PCFullFont").is_some()
         && s.dict.get(b"Length1").and_then(|l| doc.resolve(l).as_int()) == i64::try_from(bytes.len()).ok()
-        && s.decoded_within(17 << 20).is_ok_and(|data| data == bytes)
+        && s.decoded_within(bytes.len()).is_ok_and(|data| data == bytes)
 }
 
 /// The `PCFull` resources in `fonts`, in order.
@@ -307,6 +403,54 @@ fn same_resource(doc: &Document, fonts: &Dict, name: &str, bytes: &[u8], glyph_m
 mod tests {
     use super::*;
     use crate::pdf::Metrics;
+
+    #[test]
+    fn packaged_fonts_embed_exact_programs_without_weakening_external_admission() {
+        if crate::CRAFT_FONTS.is_empty() {
+            eprintln!("no packaged font build input; run with CRAFT_FONTS_DIR to exercise real programs");
+            return;
+        }
+        for face in crate::CRAFT_FONTS {
+            let resource = packaged_resource(face);
+            let (_, postscript) = names(face.bytes).unwrap();
+            assert!(
+                matching_faces(&postscript).iter().any(|found| std::ptr::eq(*found, face)),
+                "saved PostScript name must resolve to its packaged face"
+            );
+            let mut doc = Document::new_empty();
+            let mut fonts = Dict::new();
+            let selected = embed_packaged_text(&mut doc, &mut fonts, &resource, "中文测试 A123").unwrap_or_else(|e| panic!("{}: {e}", face.name()));
+            let font = doc.dict(fonts.get(selected.as_bytes()).unwrap()).unwrap();
+            assert_eq!(crate::pdf::embedded_sfnt(&doc, &font).unwrap(), face.bytes, "{} is embedded unchanged", face.name());
+            let metrics = Metrics::from_dict(&doc, &font);
+            assert_eq!(metrics.decode(&metrics.encode("中文测试 A123").unwrap()), "中文测试 A123");
+            // The ordinary file-picker path never inherits build-input authorization,
+            // even when the uploaded bytes exactly match a packaged font.
+            assert!(validate_document_input(face.bytes).is_err(), "file-picker face {} was unexpectedly admitted", face.name());
+            let mut external = face.bytes.to_vec();
+            external.push(0);
+            assert!(packaged_font(&external).is_none());
+            assert!(validate_document_input(&external).is_err(), "external face {} was unexpectedly admitted", face.name());
+            eprintln!("verified packaged program {} ({} bytes)", face.name(), face.bytes.len());
+        }
+    }
+
+    #[test]
+    fn packaged_validation_keeps_table_and_pdf_mapping_boundaries() {
+        let source = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+        let mut broken = source.to_vec();
+        // First sfnt table's offset is outside the input. Trusted provenance is
+        // not a substitute for validating actual table boundaries.
+        broken[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(validate_structure(&broken, true).is_err());
+        assert!(validate_structure(b"not a font", true).is_err());
+        let font = FontRef::new(source).unwrap();
+        let mappings = vec![("A".into(), font.charmap().map('A').unwrap()); 65_535];
+        let mut doc = Document::new_empty();
+        let before = doc.object_numbers().len();
+        assert!(embed_mapping(&mut doc, &mut Dict::new(), source, "Inter", &mappings).is_err());
+        assert_eq!(doc.object_numbers().len(), before);
+    }
 
     #[test]
     fn full_unicode_embedding_keeps_outlines_advances_and_roundtrip_codes() {

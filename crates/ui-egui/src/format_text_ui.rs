@@ -97,6 +97,13 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, look: &mut AddedText, extras:
                     out.font = Some(FontChoice::Family(f));
                 }
             }
+            if fonts.sources.is_none() {
+                for (index, face) in pdfcraft_fonts::CRAFT_FONTS.iter().enumerate() {
+                    if ui.selectable_label(look.family == FontFamily::Packaged(index), face.name()).clicked() {
+                        out.font = Some(FontChoice::Family(FontFamily::Packaged(index)));
+                    }
+                }
+            }
             if fonts.sources.is_some() {
                 ui.separator();
                 if ui.selectable_label(false, tl!("Load font…")).clicked() {
@@ -173,15 +180,21 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, look: &mut AddedText, extras:
         });
     });
 
+    // Packaged faces are the exact selected regular program, without synthetic styles.
+    let packaged = matches!(look.family, FontFamily::Packaged(_)) || !pdfcraft_fonts::embedding::matching_faces(&fonts.shown).is_empty();
     // Bold, italic, underline, superscript, subscript.
     let mut extras = extras;
     row(ui, |ui| {
-        if icons::button(ui, "bold", 30.0, look.bold, tl!("Bold")).clicked() {
-            look.bold = !look.bold;
-        }
-        if icons::button(ui, "italic", 30.0, look.italic, tl!("Italic")).clicked() {
-            look.italic = !look.italic;
-        }
+        ui.add_enabled_ui(!packaged, |ui| {
+            if icons::button(ui, "bold", 30.0, look.bold, tl!("Bold")).clicked() {
+                look.bold = !look.bold;
+            }
+            if icons::button(ui, "italic", 30.0, look.italic, tl!("Italic")).clicked() {
+                look.italic = !look.italic;
+            }
+        })
+        .response
+        .on_disabled_hover_text(tl!("This font has no bold or italic face."));
         match extras.as_deref_mut() {
             Some(e) => {
                 if icons::button(ui, "underline", 30.0, e.underline, tl!("Underline")).clicked() {

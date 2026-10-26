@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+pdfcraft-fonts = { workspace = true }
 pdfcraft-engine = { workspace = true }
 pdfcraft-cos = { workspace = true }
 pdfcraft-render = { workspace = true }
@@ -26,7 +27,6 @@ default = ["mcp"]
 mcp = ["dep:base64"]
 
 [dev-dependencies]
-pdfcraft-fonts = { workspace = true }
 png = "0.18"
 flate2.workspace = true
 pdfcraft-model = { workspace = true }

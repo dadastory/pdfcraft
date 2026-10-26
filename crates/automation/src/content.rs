@@ -40,7 +40,11 @@ fn style(a: &Args, t: &mut AddedText) -> Result<()> {
             "helvetica" | "sans" | "arial" => FontFamily::Helvetica,
             "times" | "serif" => FontFamily::Times,
             "courier" | "mono" | "monospace" => FontFamily::Courier,
-            other => return Err(bad(format!("unknown font {other:?} (helvetica, times, courier)"))),
+            _ => pdfcraft_fonts::CRAFT_FONTS
+                .iter()
+                .position(|face| face.family == f || pdfcraft_fonts::embedding::packaged_resource(face) == f)
+                .map(FontFamily::Packaged)
+                .ok_or_else(|| bad("unknown font; use helvetica/times/courier or a packaged font from text_fonts"))?,
         };
     }
     if let Some(b) = a.opt_bool("bold")? {

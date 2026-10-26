@@ -26,6 +26,8 @@ pub enum Family {
     Helvetica,
     Times,
     Courier,
+    /// A face from this build's immutable font catalogue (not an uploaded font).
+    Packaged(usize),
 }
 
 impl Family {
@@ -34,6 +36,7 @@ impl Family {
             Family::Helvetica => "Helvetica",
             Family::Times => "Times",
             Family::Courier => "Courier",
+            Family::Packaged(index) => pdfcraft_fonts::CRAFT_FONTS.get(index).map_or("Unavailable packaged font", |face| face.family),
         }
     }
 
@@ -52,6 +55,7 @@ impl Family {
             (Family::Courier, true, false) => "Courier-Bold",
             (Family::Courier, false, true) => "Courier-Oblique",
             (Family::Courier, true, true) => "Courier-BoldOblique",
+            (Family::Packaged(index), _, _) => pdfcraft_fonts::CRAFT_FONTS.get(index).map_or("Helvetica", |face| face.family),
         }
     }
 
@@ -72,6 +76,9 @@ impl Family {
     /// `italic` matters: the item is written out as the oblique/italic face (see [`Family::base_font`]),
     /// whose published widths differ from the upright face (Times-Italic `A` is 611, Times-Roman 722).
     pub fn width(self, s: &str, size: f64, bold: bool, italic: bool) -> f64 {
+        if let Family::Packaged(index) = self {
+            return pdfcraft_fonts::CRAFT_FONTS.get(index).map_or(0.0, |face| pdfcraft_fonts::embedding::packaged_width(face, s, size));
+        }
         self.std14(bold, italic).text_width(s, size)
     }
 
@@ -90,6 +97,7 @@ impl Family {
             (Family::Helvetica, true, false) => Std14::HelveticaBold,
             (Family::Helvetica, false, true) => Std14::HelveticaOblique,
             (Family::Helvetica, true, true) => Std14::HelveticaBoldOblique,
+            (Family::Packaged(_), _, _) => Std14::Helvetica,
         }
     }
 }
@@ -239,6 +247,12 @@ pub fn lines(t: &AddedText) -> Vec<String> {
 /// does).
 fn wrapped(t: &AddedText) -> Vec<(String, bool)> {
     let width = (t.rect[2] - t.rect[0]).max(t.size);
+    if matches!(t.family, Family::Packaged(_)) {
+        return pdfcraft_fonts::wrap_with(&t.text, t.size, width, |s, size| t.family.width(s, size, false, false))
+            .into_iter()
+            .map(|line| (line, false))
+            .collect();
+    }
     let mut out = Vec::new();
     for para in t.text.split('\n') {
         // Arabic or Hebrew: laid out with the bidirectional algorithm and shaped.
@@ -327,6 +341,12 @@ fn is_hebrew(c: char) -> bool {
 /// draw (or that has no face to draw it). Page-content tools refuse such text; the Add-text editor
 /// keeps it open.
 pub fn first_undrawable(t: &AddedText) -> Option<char> {
+    if let Family::Packaged(index) = t.family {
+        return t.text.chars().find(|c| {
+            !matches!(c, '\n' | '\r')
+                && !pdfcraft_fonts::CRAFT_FONTS.get(index).is_some_and(|face| pdfcraft_fonts::embedding::covers(face.bytes, &c.to_string()))
+        });
+    }
     if t.text.chars().any(is_thai) {
         if let Some(c) = t.text.chars().find(|c| is_thai(*c) && !pdfcraft_fonts::thai_has(*c)) {
             return Some(c);
@@ -755,6 +775,53 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
     .into_bytes();
     match c {
         Content::Text(t) => {
+            if let Family::Packaged(index) = t.family {
+                let face = pdfcraft_fonts::CRAFT_FONTS
+                    .get(index)
+                    .ok_or_else(|| EditError::Invalid("the packaged font is not present in this build".into()))?;
+                let mut fonts = taken.clone();
+                let name =
+                    pdfcraft_fonts::embedding::embed_packaged_text(doc, &mut fonts, &pdfcraft_fonts::embedding::packaged_resource(face), &t.text)
+                        .map_err(EditError::Invalid)?;
+                let font = fonts.get(name.as_bytes()).cloned().ok_or_else(|| EditError::Invalid("the packaged font could not be embedded".into()))?;
+                let metrics = pdfcraft_fonts::pdf::Metrics::from_dict(
+                    doc,
+                    &doc.dict(&font).ok_or_else(|| EditError::Invalid("the packaged font has no dictionary".into()))?,
+                );
+                let mut selected = Dict::new();
+                selected.set(name.clone().into_bytes(), font);
+                res.set(b"Font".to_vec(), Object::Dict(selected));
+                let r = text_rect(t);
+                let [cr, cg, cb] = t.color.map(|v| v.clamp(0.0, 1.0));
+                out.extend(format!("BT /{name} {} Tf {} {} {} rg\n", n(t.size), n(cr), n(cg), n(cb)).bytes());
+                let all = lines(t);
+                for (i, line) in all.iter().enumerate() {
+                    let width = t.family.width(line, t.size, false, false);
+                    let x = match t.align {
+                        Align::Left | Align::Justify => r[0],
+                        Align::Center => r[0] + (r[2] - r[0] - width) / 2.0,
+                        Align::Right => r[2] - width,
+                    };
+                    let y = r[3] - (i as f64 * 1.2 + 0.95) * t.size;
+                    let spaces = line.matches(' ').count();
+                    let extra = if t.align == Align::Justify && i + 1 < all.len() && spaces > 0 {
+                        ((r[2] - r[0]) - width).max(0.0) / spaces as f64
+                    } else {
+                        0.0
+                    };
+                    out.extend(format!("1 0 0 1 {} {} Tm [", n(x), n(y)).bytes());
+                    for part in line.split_inclusive(' ') {
+                        let codes = metrics.encode(part).ok_or_else(|| EditError::Invalid("the packaged font cannot encode this text".into()))?;
+                        out.extend(literal(&codes));
+                        if part.ends_with(' ') {
+                            out.extend(format!(" {} ", n(-extra * 1000.0 / t.size)).bytes());
+                        }
+                    }
+                    out.extend_from_slice(b"] TJ\n");
+                }
+                out.extend_from_slice(b"ET\nQ\n");
+                return Ok((out, res));
+            }
             let base = t.family.base_font(t.bold, t.italic);
             let name = font_name(base);
             let mut font = Dict::new();
@@ -841,6 +908,11 @@ fn params(c: &Content) -> Dict {
             d.set(b"Kind".to_vec(), Object::name("Text"));
             d.set(b"Text".to_vec(), PdfString::text(&t.text));
             d.set(b"Font".to_vec(), Object::name(t.family.base_font(t.bold, t.italic)));
+            if let Family::Packaged(index) = t.family
+                && let Some(face) = pdfcraft_fonts::CRAFT_FONTS.get(index)
+            {
+                d.set(b"PackagedFace".to_vec(), PdfString::text(&pdfcraft_fonts::embedding::packaged_resource(face)));
+            }
             d.set(b"Size".to_vec(), Object::Real(t.size));
             d.set(b"Color".to_vec(), arr(&t.color));
             d.set(
@@ -880,7 +952,13 @@ fn parse(doc: &Document, d: &Dict) -> Option<Content> {
     let rect: [f64; 4] = r.try_into().ok()?;
     match d.name(b"Kind")? {
         b"Text" => {
-            let (family, bold, italic) = Family::from_base(d.name(b"Font").unwrap_or(b"Helvetica"));
+            let (family, bold, italic) = if let Some(resource) = d.get(b"PackagedFace").and_then(Object::as_string) {
+                let resource = resource.to_text();
+                let index = pdfcraft_fonts::CRAFT_FONTS.iter().position(|face| pdfcraft_fonts::embedding::packaged_resource(face) == resource)?;
+                (Family::Packaged(index), false, false)
+            } else {
+                Family::from_base(d.name(b"Font").unwrap_or(b"Helvetica"))
+            };
             let c = nums(doc, d.get(b"Color"));
             Some(Content::Text(AddedText {
                 rect,
@@ -990,6 +1068,18 @@ fn validate(c: &Content) -> Result<(), EditError> {
     }
     match c {
         Content::Text(t) => {
+            if let Family::Packaged(index) = t.family {
+                let face = pdfcraft_fonts::CRAFT_FONTS
+                    .get(index)
+                    .ok_or_else(|| EditError::Invalid("the packaged font is not present in this build".into()))?;
+                pdfcraft_fonts::embedding::validate(face.bytes).map_err(EditError::Invalid)?;
+                if t.bold || t.italic {
+                    return Err(EditError::Invalid("the selected packaged face has no synthetic bold or italic style".into()));
+                }
+                if t.text.len() > 4_000_000 {
+                    return Err(EditError::Invalid("the added text is too large".into()));
+                }
+            }
             if t.text.trim().is_empty() {
                 return Err(EditError::Invalid("type some text first".into()));
             }

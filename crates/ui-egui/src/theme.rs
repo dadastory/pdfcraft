@@ -388,6 +388,13 @@ fn font_definitions_for_platform(prefer_hans: bool, platform: FontPolicyPlatform
             fonts.families.entry(family).or_default().push(name.clone());
         }
     }
+    // Named document faces borrow the same static bytes and keep their own
+    // baseline. The picker never clones the entire build catalogue.
+    for face in pdfcraft_fonts::CRAFT_FONTS {
+        let key = format!("pdf-packaged-{}", face.name());
+        fonts.font_data.insert(key.clone(), Arc::new(FontData::from_static(face.bytes)));
+        fonts.families.insert(FontFamily::Name(face.name().into()), vec![key]);
+    }
     // Arabic-script faces (file names, document titles), Telugu faces (the Telugu interface,
     // file names), Hebrew faces (file names, text being edited), Thai faces and Devanagari faces
     // (the Hindi interface) after the CJK ones; the ranges don't overlap.
