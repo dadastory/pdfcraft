@@ -535,12 +535,22 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
         let shown = ed.font_shown(&sources);
         let out = crate::format_text_ui::panel(ui, t, &mut ed.look, Some(&mut ed.extras), Fonts { sources: Some(&sources), shown });
         let mut changed = out.changed;
+        if out.font.is_some() {
+            app.pending_font = None;
+        }
         match out.font {
             Some(FontChoice::KeepSource) => {
                 ed.keep_source_font();
                 changed = true;
             }
             Some(FontChoice::Resource(resource)) => {
+                if let Some(font) = pdfcraft_fonts::embedding::packaged_resource_font(&resource)
+                    && !font.is_loaded()
+                    && let Some(index) = pdfcraft_fonts::CRAFT_FONTS.iter().position(|face| std::ptr::eq(face, font))
+                {
+                    app.choose_packaged_font(index, crate::packaged_fonts::FontSelection::Paragraph { before: Box::new(ed), resource });
+                    return;
+                }
                 if pdfcraft_fonts::embedding::packaged_resource_font(&resource).is_some() {
                     ed.look.bold = false;
                     ed.look.italic = false;
@@ -596,7 +606,12 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     match selected {
         Some((page, index, text)) => {
             let mut style = text.clone();
-            added_text_format(ui, t, &mut style);
+            if added_text_format(ui, t, &mut style) {
+                app.pending_font = None;
+            }
+            if app.defer_added_font(&text, &style, Some((page, index))) {
+                return;
+            }
             if style != text {
                 // The reusable style follows the selection only when the edit took, so a refused one adds nothing odd later.
                 if app.apply_edit(pdfcraft_engine::Edit::UpdateContent { page, index, content: pdfcraft_engine::AddedContent::Text(style.clone()) }) {
@@ -607,7 +622,12 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
         None if app.quick_tool == crate::QuickTool::AddText => {
             crate::content_ui::hint(ui, t);
             let mut style = app.text_style.clone();
-            added_text_format(ui, t, &mut style);
+            if added_text_format(ui, t, &mut style) {
+                app.pending_font = None;
+            }
+            if app.defer_added_font(&app.text_style.clone(), &style, None) {
+                return;
+            }
             app.text_style = style;
         }
         None => {}
@@ -615,7 +635,7 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
 }
 
 /// Format text for added text: the standard families, size, colour, style and alignment.
-fn added_text_format(ui: &mut egui::Ui, t: &Tokens, style: &mut pdfcraft_engine::AddedText) {
+fn added_text_format(ui: &mut egui::Ui, t: &Tokens, style: &mut pdfcraft_engine::AddedText) -> bool {
     let shown = style.family.label().to_string();
     let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown });
     if let Some(crate::format_text_ui::FontChoice::Family(family)) = out.font {
@@ -624,7 +644,9 @@ fn added_text_format(ui: &mut egui::Ui, t: &Tokens, style: &mut pdfcraft_engine:
             style.bold = false;
             style.italic = false;
         }
+        return true;
     }
+    false
 }
 
 impl PdfCraftApp {

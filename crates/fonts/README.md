@@ -81,3 +81,12 @@ Document font inputs use `embedding`: bounded static TrueType/OpenType-CFF valid
 exact program preservation, Unicode/CID/GID mapping and full-face subset completion.
 `shaping` uses the same program with harfrust and UAX #9; source UI fallback fonts are
 never exported. See [existing-text editing](../../docs/editing-existing-text.md).
+
+A reviewed host can supply `CRAFT_FONTS_DIR/fonts/served.json` instead of the legacy
+manifest. It contains stable face identities, family/style/scripts, default identity,
+local asset URL, SHA-256, byte size and PostScript name. This mode embeds no catalog
+programs and does not filter scripts. `CraftFont::register` validates exact bytes and
+static font structure once, then retains the immutable program for all views. The
+host owns fetching/retries; the font crate never performs network I/O. Collection
+faces and variable instances must already be converted to standalone static programs
+by the maintained asset tooling. External font admission is unchanged.

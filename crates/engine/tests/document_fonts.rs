@@ -92,26 +92,53 @@ fn contextual_arabic_marks_ligatures_and_mixed_bidi_keep_logical_text_after_reop
         eprintln!("set CRAFT_FONTS_DIR to test full Arabic glyph programs");
         return;
     };
-    if pdfcraft_fonts::embedding::validate(font.bytes).is_err() {
+    if pdfcraft_fonts::embedding::validate(font.data()).is_err() {
         eprintln!("set PDFCRAFT_TEST_ARABIC_FONT to an openly licensed static Noto Sans Arabic face");
         return;
     }
-    exercise(font.bytes.to_vec(), "سَلَام 123", "NotoSansArabic-Regular");
+    exercise(font.data().to_vec(), "سَلَام 123", "NotoSansArabic-Regular");
 }
 
 #[test]
-fn every_packaged_font_supports_chinese_edit_add_save_reopen_and_edit_again() {
+fn every_packaged_font_supports_its_glyphs_edit_add_save_reopen_and_edit_again() {
     if pdfcraft_fonts::CRAFT_FONTS.is_empty() {
         eprintln!("set CRAFT_FONTS_DIR for packaged-font save/reopen acceptance");
         return;
     }
     for (index, font) in pdfcraft_fonts::CRAFT_FONTS.iter().enumerate() {
+        if let Some(source) = &font.served {
+            assert!(font.bytes.is_empty(), "metadata must not embed the collection");
+            font.register(std::fs::read(source.local_file).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", font.name()));
+        }
+        let covers = |ch: char| pdfcraft_fonts::embedding::covers(font.data(), &ch.to_string());
+        let mut sample: String = "中文编辑ABC123".chars().filter(|ch| covers(*ch)).collect();
+        if sample.is_empty() {
+            use skrifa::MetadataProvider;
+            sample = skrifa::FontRef::new(font.data())
+                .unwrap()
+                .charmap()
+                .mappings()
+                .filter(|(_, gid)| gid.to_u32() > 0)
+                .filter_map(|(cp, _)| char::from_u32(cp))
+                .filter(|ch| !ch.is_control() && !ch.is_whitespace())
+                .take(6)
+                .collect();
+        }
+        assert!(!sample.is_empty(), "{} has no testable glyph", font.name());
+        let edit_text = sample.clone();
+        let add_text: String = sample.chars().rev().collect();
+        let mut replacement: String = "修改DEF456".chars().filter(|ch| covers(*ch)).collect();
+        if replacement.is_empty() {
+            replacement = sample.chars().rev().collect();
+        }
         let mut session = Session::new();
         let id = session.open("source.pdf", None, document(), None).unwrap();
-        let mut external = font.bytes.to_vec();
+        let mut external = font.data().to_vec();
         external.push(0);
-        assert!(session.apply(id, Edit::RegisterTextFont { page: 0, bytes: Arc::new(external) }).is_err());
-        assert!(!session.get(id).unwrap().dirty, "rejected external input changed the document");
+        if pdfcraft_fonts::embedding::validate_document_input(font.data()).is_err() {
+            assert!(session.apply(id, Edit::RegisterTextFont { page: 0, bytes: Arc::new(external) }).is_err());
+            assert!(!session.get(id).unwrap().dirty, "rejected external input changed the document");
+        }
         assert!(
             session
                 .apply(
@@ -120,7 +147,7 @@ fn every_packaged_font_supports_chinese_edit_add_save_reopen_and_edit_again() {
                         page: 0,
                         text: pdfcraft_engine::AddedText {
                             rect: [30.0, 50.0, 270.0, 90.0],
-                            text: "中文".into(),
+                            text: sample.clone(),
                             family: pdfcraft_engine::FontFamily::Packaged(index),
                             bold: true,
                             ..Default::default()
@@ -133,7 +160,7 @@ fn every_packaged_font_supports_chinese_edit_add_save_reopen_and_edit_again() {
         assert!(!session.get(id).unwrap().dirty);
         let style = BlockStyle { resource: Some(pdfcraft_fonts::embedding::packaged_resource(font)), width: Some(240.0), ..Default::default() };
         session
-            .apply(id, Edit::EditTextBlock { page: 0, block: 0, text: "中文编辑 A123".into(), style: style.clone() })
+            .apply(id, Edit::EditTextBlock { page: 0, block: 0, text: edit_text.clone(), style: style.clone() })
             .unwrap_or_else(|e| panic!("edit with {}: {e}", font.name()));
         session
             .apply(
@@ -142,7 +169,7 @@ fn every_packaged_font_supports_chinese_edit_add_save_reopen_and_edit_again() {
                     page: 0,
                     text: pdfcraft_engine::AddedText {
                         rect: [30.0, 50.0, 270.0, 90.0],
-                        text: "中文新增 B456".into(),
+                        text: add_text.clone(),
                         family: pdfcraft_engine::FontFamily::Packaged(index),
                         ..Default::default()
                     },
@@ -155,25 +182,30 @@ fn every_packaged_font_supports_chinese_edit_add_save_reopen_and_edit_again() {
         let programs: Vec<_> = parsed
             .scan_objects()
             .filter_map(|(_, object)| match object.as_ref() {
-                Object::Stream(stream) if stream.dict.get(b"PCFullFont").is_some() => Some(stream.decoded_within(font.bytes.len()).unwrap()),
+                Object::Stream(stream) if stream.dict.get(b"PCFullFont").is_some() => Some(stream.decoded_within(font.data().len()).unwrap()),
                 _ => None,
             })
             .collect();
         assert_eq!(programs.len(), 1, "{} must reuse its full program", font.name());
-        assert_eq!(programs[0], font.bytes, "{} original bytes changed", font.name());
+        assert_eq!(programs[0], font.data(), "{} original bytes changed", font.name());
         let reopened = session.open("saved.pdf", None, saved, None).unwrap();
         assert_eq!(pixels(session.get(reopened).unwrap().display.clone()), before, "{} rendering changed after reopen", font.name());
         let added = session.get(reopened).unwrap().added();
         let pdfcraft_engine::AddedContent::Text(added) = &added[0].content else { panic!("missing added text") };
         assert_eq!(added.family, pdfcraft_engine::FontFamily::Packaged(index));
-        assert_eq!(added.text, "中文新增 B456");
-        let block = session.get(reopened).unwrap().text_blocks(0).iter().position(|b| b.editor_text == "中文编辑 A123").unwrap();
+        assert_eq!(added.text, add_text);
+        let block = session.get(reopened).unwrap().text_blocks(0).iter().position(|b| b.editor_text == edit_text).unwrap();
         session
-            .apply(reopened, Edit::EditTextBlock { page: 0, block, text: "中文修改 C789".into(), style: BlockStyle::default() })
+            .apply(reopened, Edit::EditTextBlock { page: 0, block, text: replacement.clone(), style: BlockStyle::default() })
             .unwrap_or_else(|e| panic!("re-edit with {}: {e}", font.name()));
         let again = session.save_bytes(reopened).unwrap();
         let next = session.open("again.pdf", None, again, None).unwrap();
-        assert!(session.get(next).unwrap().text_blocks(0).iter().any(|b| b.editor_text == "中文修改 C789"));
+        assert!(
+            session.get(next).unwrap().text_blocks(0).iter().any(|b| b.editor_text == replacement),
+            "{} re-edit expected {replacement:?}, got {:?}",
+            font.name(),
+            session.get(next).unwrap().text_blocks(0).iter().map(|b| b.editor_text.clone()).collect::<Vec<_>>()
+        );
         eprintln!("edit/add/save/reopen/re-edit passed: {}", font.name());
     }
 }

@@ -51,7 +51,7 @@ fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)>
     };
     cache
         .get_or_init(|| {
-            let font = FontRef::new(script.font()?.bytes).ok()?;
+            let font = FontRef::new(script.font()?.data()).ok()?;
             let data = ShaperData::new(&font);
             Some((font, data))
         })

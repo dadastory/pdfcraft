@@ -36,15 +36,15 @@ fn style(a: &Args, t: &mut AddedText) -> Result<()> {
         t.size = s;
     }
     if let Some(f) = a.opt_str("font")? {
-        t.family = match f.to_ascii_lowercase().as_str() {
-            "helvetica" | "sans" | "arial" => FontFamily::Helvetica,
-            "times" | "serif" => FontFamily::Times,
-            "courier" | "mono" | "monospace" => FontFamily::Courier,
-            _ => pdfcraft_fonts::CRAFT_FONTS
-                .iter()
-                .position(|face| face.family == f || pdfcraft_fonts::embedding::packaged_resource(face) == f)
-                .map(FontFamily::Packaged)
-                .ok_or_else(|| bad("unknown font; use helvetica/times/courier or a packaged font from text_fonts"))?,
+        t.family = if let Some(index) = pdfcraft_fonts::embedding::selected_packaged_font(f) {
+            FontFamily::Packaged(index)
+        } else {
+            match f.to_ascii_lowercase().as_str() {
+                "helvetica" | "sans" | "arial" => FontFamily::Helvetica,
+                "times" | "serif" => FontFamily::Times,
+                "courier" | "mono" | "monospace" => FontFamily::Courier,
+                _ => return Err(bad("unknown font; use helvetica/times/courier or a packaged font from text_fonts")),
+            }
         };
     }
     if let Some(b) = a.opt_bool("bold")? {

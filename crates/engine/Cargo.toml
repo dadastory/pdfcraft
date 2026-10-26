@@ -54,3 +54,4 @@ chrono = { workspace = true, features = ["clock"] }
 
 [dev-dependencies]
 pdfcraft-testkit = { workspace = true }
+skrifa = "0.44"

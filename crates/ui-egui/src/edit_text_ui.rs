@@ -413,7 +413,7 @@ fn look_of(b: &pdfcraft_engine::TextBlock) -> pdfcraft_engine::AddedText {
 pub(crate) fn editor_font(look: &pdfcraft_engine::AddedText, size: f32) -> FontId {
     let family = match (look.family, look.bold) {
         (pdfcraft_engine::FontFamily::Packaged(index), _) => {
-            pdfcraft_fonts::CRAFT_FONTS.get(index).map_or(FontFamily::Proportional, |face| FontFamily::Name(face.name().into()))
+            pdfcraft_fonts::CRAFT_FONTS.get(index).map_or(FontFamily::Proportional, |face| FontFamily::Name(face.key().into()))
         }
         (pdfcraft_engine::FontFamily::Courier, _) => FontFamily::Monospace,
         (_, true) => FontFamily::Name("semibold".into()),

@@ -214,6 +214,20 @@ pub fn install_fonts_for(ctx: &egui::Context, cjk: CjkPreference) {
     ctx.set_fonts(installed_font_definitions(cjk));
 }
 
+/// Extend the atlas without discarding document fonts installed by the inline editor.
+pub(crate) fn install_loaded_fonts(ctx: &egui::Context) {
+    for face in pdfcraft_fonts::CRAFT_FONTS.iter().filter(|face| face.is_loaded()) {
+        ctx.add_font(egui::epaint::text::FontInsert {
+            name: format!("pdf-packaged-{}", face.key()),
+            data: FontData::from_static(face.data()),
+            families: vec![egui::epaint::text::InsertFontFamily {
+                family: FontFamily::Name(face.key().into()),
+                priority: egui::epaint::text::FontPriority::Highest,
+            }],
+        });
+    }
+}
+
 /// The name of the installed face [`installed_font_definitions`] may add after the embedded ones.
 pub const SYSTEM_FALLBACK: &str = "system-fallback";
 /// The name of the installed Devanagari (Hindi) face [`installed_font_definitions`] may add.
@@ -379,10 +393,13 @@ fn font_definitions_for_platform(prefer_hans: bool, platform: FontPolicyPlatform
     fonts.families.entry(FontFamily::Monospace).or_default().insert(1, "Inter".to_owned());
     // The same static bytes pdfcraft-fonts uses for Japanese/Chinese text in PDFs: one copy, not two.
     for face in pdfcraft_fonts::ui_cjk_fonts(prefer_hans) {
+        if !face.is_loaded() {
+            continue;
+        }
         let name = face.name();
         // Japanese and Chinese faces have distinct family names, so no collision here.
         if !fonts.font_data.contains_key(&name) {
-            add(&mut fonts, &name, face.bytes);
+            add(&mut fonts, &name, face.data());
         }
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             fonts.families.entry(family).or_default().push(name.clone());
@@ -390,10 +407,10 @@ fn font_definitions_for_platform(prefer_hans: bool, platform: FontPolicyPlatform
     }
     // Named document faces borrow the same static bytes and keep their own
     // baseline. The picker never clones the entire build catalogue.
-    for face in pdfcraft_fonts::CRAFT_FONTS {
-        let key = format!("pdf-packaged-{}", face.name());
-        fonts.font_data.insert(key.clone(), Arc::new(FontData::from_static(face.bytes)));
-        fonts.families.insert(FontFamily::Name(face.name().into()), vec![key]);
+    for face in pdfcraft_fonts::CRAFT_FONTS.iter().filter(|face| face.is_loaded()) {
+        let key = format!("pdf-packaged-{}", face.key());
+        fonts.font_data.insert(key.clone(), Arc::new(FontData::from_static(face.data())));
+        fonts.families.insert(FontFamily::Name(face.key().into()), vec![key]);
     }
     // Arabic-script faces (file names, document titles), Telugu faces (the Telugu interface,
     // file names), Hebrew faces (file names, text being edited), Thai faces and Devanagari faces
@@ -405,9 +422,12 @@ fn font_definitions_for_platform(prefer_hans: bool, platform: FontPolicyPlatform
         .chain(pdfcraft_fonts::ui_thai_fonts())
         .chain(pdfcraft_fonts::ui_devanagari_fonts())
     {
+        if !face.is_loaded() {
+            continue;
+        }
         let name = face.name();
         if !fonts.font_data.contains_key(&name) {
-            add(&mut fonts, &name, face.bytes);
+            add(&mut fonts, &name, face.data());
         }
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             let stack = fonts.families.entry(family).or_default();

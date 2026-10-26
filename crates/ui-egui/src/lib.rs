@@ -73,9 +73,11 @@ pub mod marks {
 mod content_ui;
 mod link_ui;
 mod object_ui;
+mod packaged_fonts;
 pub use create_ui::Clip;
 pub use link_ui::LinkDraft;
 pub use optimize_ui::{OptimizeDraft, OptimizeTab};
+pub use packaged_fonts::HostFontFn;
 pub use sign_ui::{DigitalIdEntry, SignDraft, SignGraphic, SignStep};
 mod autoscroll;
 mod bidi;
@@ -645,6 +647,9 @@ pub struct PdfCraftApp {
     pub host_save_request: Option<HostPublicationFn>,
     pub host_open_request: Option<Box<dyn FnMut()>>,
     pub host_files_request: Option<HostFilesFn>,
+    pub host_font_request: Option<HostFontFn>,
+    pending_font: Option<packaged_fonts::PendingFont>,
+    fonts_generation: usize,
     pub host_opened: Option<HostOpenedFn>,
     pub host_asset_request: Option<HostAssetFn>,
     pub(crate) host_pending_saves: std::collections::BTreeMap<(u64, u64), HostSaveContinuation>,
@@ -1030,6 +1035,9 @@ impl PdfCraftApp {
             host_save_request: None,
             host_open_request: None,
             host_files_request: None,
+            host_font_request: None,
+            pending_font: None,
+            fonts_generation: 0,
             host_opened: None,
             host_asset_request: None,
             host_pending_saves: Default::default(),
@@ -3214,6 +3222,7 @@ impl eframe::App for PdfCraftApp {
             egui_extras::install_image_loaders(ctx);
             theme::install_fonts_for(ctx, cjk);
             self.fonts_cjk = cjk;
+            self.fonts_generation = pdfcraft_fonts::font_generation();
             theme::apply(ctx, self.theme);
             self.styled = true;
         } else {
@@ -3222,6 +3231,11 @@ impl eframe::App for PdfCraftApp {
                 // Same family names as before, so named fonts stay valid while the new set loads.
                 theme::install_fonts_for(ctx, cjk);
                 self.fonts_cjk = cjk;
+            }
+            if self.fonts_generation != pdfcraft_fonts::font_generation() {
+                theme::install_loaded_fonts(ctx);
+                self.fonts_generation = pdfcraft_fonts::font_generation();
+                self.fonts_ready = false;
             }
         }
         self.sync_theme(ctx);
@@ -3357,6 +3371,7 @@ impl eframe::App for PdfCraftApp {
         self.poll_optimize();
         self.poll_action();
         self.process_file_requests();
+        self.process_font_requests();
         #[cfg(not(target_arch = "wasm32"))]
         self.process_picked();
     }

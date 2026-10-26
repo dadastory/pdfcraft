@@ -36,7 +36,7 @@ impl Family {
             Family::Helvetica => "Helvetica",
             Family::Times => "Times",
             Family::Courier => "Courier",
-            Family::Packaged(index) => pdfcraft_fonts::CRAFT_FONTS.get(index).map_or("Unavailable packaged font", |face| face.family),
+            Family::Packaged(index) => pdfcraft_fonts::CRAFT_FONTS.get(index).map_or("Unavailable packaged font", |face| face.label()),
         }
     }
 
@@ -344,7 +344,7 @@ pub fn first_undrawable(t: &AddedText) -> Option<char> {
     if let Family::Packaged(index) = t.family {
         return t.text.chars().find(|c| {
             !matches!(c, '\n' | '\r')
-                && !pdfcraft_fonts::CRAFT_FONTS.get(index).is_some_and(|face| pdfcraft_fonts::embedding::covers(face.bytes, &c.to_string()))
+                && !pdfcraft_fonts::CRAFT_FONTS.get(index).is_some_and(|face| pdfcraft_fonts::embedding::covers(face.data(), &c.to_string()))
         });
     }
     if t.text.chars().any(is_thai) {
@@ -954,7 +954,8 @@ fn parse(doc: &Document, d: &Dict) -> Option<Content> {
         b"Text" => {
             let (family, bold, italic) = if let Some(resource) = d.get(b"PackagedFace").and_then(Object::as_string) {
                 let resource = resource.to_text();
-                let index = pdfcraft_fonts::CRAFT_FONTS.iter().position(|face| pdfcraft_fonts::embedding::packaged_resource(face) == resource)?;
+                let selected = pdfcraft_fonts::embedding::packaged_resource_font(&resource)?;
+                let index = pdfcraft_fonts::CRAFT_FONTS.iter().position(|face| std::ptr::eq(face, selected))?;
                 (Family::Packaged(index), false, false)
             } else {
                 Family::from_base(d.name(b"Font").unwrap_or(b"Helvetica"))
@@ -1072,7 +1073,7 @@ fn validate(c: &Content) -> Result<(), EditError> {
                 let face = pdfcraft_fonts::CRAFT_FONTS
                     .get(index)
                     .ok_or_else(|| EditError::Invalid("the packaged font is not present in this build".into()))?;
-                pdfcraft_fonts::embedding::validate(face.bytes).map_err(EditError::Invalid)?;
+                pdfcraft_fonts::embedding::validate(face.data()).map_err(EditError::Invalid)?;
                 if t.bold || t.italic {
                     return Err(EditError::Invalid("the selected packaged face has no synthetic bold or italic style".into()));
                 }

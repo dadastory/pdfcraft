@@ -145,7 +145,7 @@ pub fn japanese_glyph(ch: char) -> Result<GlyphOutline, GlyphError> {
 /// The bounded outline and advance from the explicitly selected craft-fonts face.
 /// Uses the same complexity and missing-glyph checks as [`japanese_glyph`].
 pub fn japanese_glyph_from(face: &crate::CraftFont, ch: char) -> Result<GlyphOutline, GlyphError> {
-    let Ok(font) = FontRef::new(face.bytes) else { return Err(GlyphError::Missing) };
+    let Ok(font) = FontRef::new(face.data()) else { return Err(GlyphError::Missing) };
     let loc = LocationRef::default();
     let metrics = font.metrics(Size::unscaled(), loc);
     let scale = 1.0 / metrics.units_per_em.max(1) as f64;

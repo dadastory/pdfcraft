@@ -112,7 +112,7 @@ pub fn text_editor_fonts(doc: &Document, page: usize) -> Result<Vec<TextEditorFo
     let p = page_dict(doc, page)?;
     let resources = p.dict.get(b"Resources").and_then(|o| doc.dict(o)).unwrap_or_default();
     let fonts = resources.get(b"Font").and_then(|o| doc.dict(o)).unwrap_or_default();
-    let mut budget = 32_usize << 20;
+    let mut budget = (32_usize << 20).max(pdfcraft_fonts::embedding::program_read_limit());
     let mut result = Vec::new();
     for (name, font) in fonts.iter().take(128) {
         let Some(font) = doc.dict(font) else { continue };
@@ -132,11 +132,11 @@ pub fn text_editor_fonts(doc: &Document, page: usize) -> Result<Vec<TextEditorFo
     let source_faces: Vec<_> = result.iter().map(|p| p.face.clone()).collect();
     for face in source_faces {
         for full in pdfcraft_fonts::embedding::matching_faces(&face) {
-            if full.bytes.len() > budget || result.iter().any(|p| p.resource == format!("PCApproved{}", full.name())) {
+            if !full.is_loaded() || full.data().len() > budget || result.iter().any(|p| p.resource == format!("PCApproved{}", full.key())) {
                 continue;
             }
-            budget -= full.bytes.len();
-            result.push(TextEditorFont { resource: format!("PCApproved{}", full.name()), face: face.clone(), bytes: full.bytes.to_vec() });
+            budget -= full.data().len();
+            result.push(TextEditorFont { resource: format!("PCApproved{}", full.key()), face: face.clone(), bytes: full.data().to_vec() });
         }
     }
     Ok(result)

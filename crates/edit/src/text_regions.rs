@@ -599,7 +599,7 @@ pub(super) fn rewrite_styled_block(
                 if let Some(name) = full_faces.get(&key) {
                     name.clone()
                 } else {
-                    let text: String = draft.chars().filter(|c| pdfcraft_fonts::embedding::covers(face.bytes, &c.to_string())).collect();
+                    let text: String = draft.chars().filter(|c| pdfcraft_fonts::embedding::covers(face.data(), &c.to_string())).collect();
                     let name =
                         pdfcraft_fonts::embedding::embed_packaged_text(doc, &mut fonts, &pdfcraft_fonts::embedding::packaged_resource(face), &text)
                             .map_err(EditError::Invalid)?;
@@ -625,7 +625,7 @@ pub(super) fn rewrite_styled_block(
                 } else {
                     let family = pdfcraft_fonts::embedding::names(&bytes).map_or_else(|_| source.base_font.clone(), |(family, _)| family);
                     let name = if let Some(face) = pdfcraft_fonts::embedding::packaged_font(&bytes) {
-                        let text: String = draft.chars().filter(|c| pdfcraft_fonts::embedding::covers(face.bytes, &c.to_string())).collect();
+                        let text: String = draft.chars().filter(|c| pdfcraft_fonts::embedding::covers(face.data(), &c.to_string())).collect();
                         pdfcraft_fonts::embedding::embed_packaged_text(doc, &mut fonts, &pdfcraft_fonts::embedding::packaged_resource(face), &text)
                     } else {
                         pdfcraft_fonts::embedding::embed(doc, &mut fonts, &bytes, &family)
