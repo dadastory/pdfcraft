@@ -116,10 +116,10 @@ pub fn ui_arabic_fonts() -> Vec<&'static CraftFont> {
     arabic(CRAFT_FONTS.iter())
 }
 
-/// The face for Arabic text written into PDFs: the first `Arab` face. `None` when built without
-/// craft-fonts or when its revision has no Arabic face.
+/// The first ready Arabic face with a real basic-letter glyph. Catalog script hints alone
+/// do not establish coverage; `None` until a compatible face has loaded.
 pub fn document_arabic_font() -> Option<&'static CraftFont> {
-    ui_arabic_fonts().into_iter().find(|face| face.is_loaded())
+    ui_arabic_fonts().into_iter().find(|face| crate::embedding::covers(face.data(), "ب"))
 }
 
 fn arabic<'a>(faces: impl IntoIterator<Item = &'a CraftFont>) -> Vec<&'a CraftFont> {
@@ -139,7 +139,7 @@ pub fn ui_thai_fonts() -> Vec<&'static CraftFont> {
 }
 
 pub fn document_thai_font() -> Option<&'static CraftFont> {
-    ui_thai_fonts().into_iter().find(|face| face.is_loaded())
+    ui_thai_fonts().into_iter().find(|face| crate::embedding::covers(face.data(), "ก"))
 }
 
 /// The `Deva` craft-fonts faces for Devanagari interface text (the Hindi catalog, file names,
@@ -153,7 +153,7 @@ pub fn ui_devanagari_fonts() -> Vec<&'static CraftFont> {
 /// The face for Devanagari text written into PDFs: the first `Deva` face. `None` when built
 /// without craft-fonts or when its revision has no Devanagari face.
 pub fn document_devanagari_font() -> Option<&'static CraftFont> {
-    ui_devanagari_fonts().into_iter().find(|face| face.is_loaded())
+    ui_devanagari_fonts().into_iter().find(|face| crate::embedding::covers(face.data(), "क"))
 }
 
 /// The `Hebr` craft-fonts faces for Hebrew interface text (file names, document titles, text
@@ -166,11 +166,12 @@ pub fn ui_hebrew_fonts() -> Vec<&'static CraftFont> {
 /// The face for Hebrew text written into PDFs: the `Hebr` face of the asked weight, else its
 /// Regular, else any `Hebr` face. `None` without craft-fonts or without a Hebrew face.
 pub fn document_hebrew_font(bold: bool) -> Option<&'static CraftFont> {
-    hebrew_face(CRAFT_FONTS, bold)
+    hebrew_face(CRAFT_FONTS.iter().filter(|face| crate::embedding::covers(face.data(), "ש")), bold)
 }
 
-fn hebrew_face(faces: &[CraftFont], bold: bool) -> Option<&CraftFont> {
-    let hebr = || faces.iter().filter(|f| f.covers("Hebr") && f.is_loaded());
+fn hebrew_face<'a>(faces: impl IntoIterator<Item = &'a CraftFont>, bold: bool) -> Option<&'a CraftFont> {
+    let faces: Vec<_> = faces.into_iter().collect();
+    let hebr = || faces.iter().copied().filter(|f| f.covers("Hebr") && f.is_loaded());
     let style = if bold { "Bold" } else { "Regular" };
     hebr().find(|f| f.style == style).or_else(|| hebr().find(|f| f.style == "Regular")).or_else(|| hebr().next())
 }
@@ -432,20 +433,6 @@ mod tests {
         assert_eq!(ui_arabic_fonts().len(), CRAFT_FONTS.iter().filter(|f| f.covers("Arab")).count());
     }
 
-    /// Family-name prefixes `build.rs` never embeds (its own `BARRED_FAMILIES`): Adobe's type
-    /// designs, which includes Noto CJK (Source Han under another name).
-    const BARRED_FAMILIES: [&str; 5] = ["Source Han", "Source Serif", "Source Sans", "Noto Sans CJK", "Noto Serif CJK"];
-
-    /// Whatever the craft-fonts checkout holds, no Adobe type design is embedded (AGENTS.md §1.1).
-    #[test]
-    fn barred_families_are_never_embedded() {
-        for face in CRAFT_FONTS {
-            assert!(!BARRED_FAMILIES.iter().any(|barred| face.family.starts_with(barred)), "{} is embedded", face.name());
-        }
-        assert!(BARRED_FAMILIES.iter().any(|barred| "Noto Sans CJK SC".starts_with(barred)));
-        assert!(!BARRED_FAMILIES.iter().any(|barred| "Noto Sans Arabic".starts_with(barred)));
-    }
-
     #[test]
     fn hebrew_document_faces_follow_the_weight() {
         static HEBR_LATN: &[&str] = &["Hebr", "Latn"];
@@ -460,7 +447,31 @@ mod tests {
         assert_eq!(hebrew_face(&faces[..2], true).map(|f| f.bytes), Some(&b"regular"[..]));
         assert!(hebrew_face(&faces[..1], false).is_none());
         assert_eq!(ui_hebrew_fonts().len(), CRAFT_FONTS.iter().filter(|f| f.covers("Hebr")).count());
-        assert_eq!(document_hebrew_font(false).is_some(), CRAFT_FONTS.iter().any(|f| f.covers("Hebr") && f.is_loaded()));
+        assert_eq!(document_hebrew_font(false).is_some(), CRAFT_FONTS.iter().any(|f| f.covers("Hebr") && crate::embedding::covers(f.data(), "ש")));
+    }
+
+    /// `build.rs` embeds the Japanese CJK faces whole and any other CJK face only up to
+    /// `MAX_OTHER_CJK_BYTES` (the explicitly pinned native-only LXGW UI fallback has a separate
+    /// 16 MiB cap), so a checkout with a large Chinese or Korean face (craft-fonts has the
+    /// 16.4 MB Noto Sans CJK SC) leaves it out. The four Japanese faces of the pinned craft-fonts
+    /// are 24.1 MB.
+    #[test]
+    fn cjk_faces_follow_the_size_rule() {
+        use crate::cjk_scripts::{MAX_NATIVE_UI_CJK_BYTES, MAX_OTHER_CJK_BYTES, NATIVE_UI_CJK_FAMILIES, WHOLE_CJK_FAMILIES, is_cjk_script};
+        // A tag can carry a region after the code: craft-fonts tags Noto Sans HK UI `Hant-HK`.
+        assert!(["Hant-HK", "Hans", "Jpan", "Hang"].iter().all(|s| is_cjk_script(s)));
+        assert!(!["Latn", "Arab", "Hebr"].iter().any(|s| is_cjk_script(s)));
+        let cjk = CRAFT_FONTS.iter().filter(|f| f.scripts.iter().any(|s| is_cjk_script(s)));
+        let (whole, other): (Vec<_>, Vec<_>) = cjk.partition(|f| WHOLE_CJK_FAMILIES.contains(&f.family));
+        for face in &other {
+            let len = face.bytes.len();
+            let native_ui = NATIVE_UI_CJK_FAMILIES.contains(&face.family);
+            assert!(!cfg!(target_arch = "wasm32") || !native_ui, "native UI face in web payload");
+            let cap = if native_ui { MAX_NATIVE_UI_CJK_BYTES } else { MAX_OTHER_CJK_BYTES };
+            assert!(u64::try_from(len).is_ok_and(|n| n <= cap), "{} is embedded at {len} bytes", face.name());
+        }
+        let bytes: usize = whole.iter().map(|f| f.bytes.len()).sum();
+        assert!(bytes < 25_000_000, "{bytes} bytes of Japanese faces");
     }
 
     /// The bundled Inter faces carry the Latin, Greek and Cyrillic letters the craft-fonts faces

@@ -10,6 +10,7 @@ pub type HostFontFn = Box<dyn Fn(usize, Sender<Result<(), String>>)>;
 
 pub(crate) enum FontSelection {
     Paragraph { before: Box<LineEditor>, resource: String },
+    Draft { view: usize, before: Box<crate::content_ui::TextDraft>, after: Box<AddedText> },
     Added { before: AddedText, after: Box<AddedText>, selected: Option<(usize, usize)> },
 }
 
@@ -73,6 +74,18 @@ impl PdfCraftApp {
                 let ctx = self.ctx.clone();
                 self.apply_line_format(view, editor, ctx.as_ref());
             }
+            FontSelection::Draft { view: index, before, after } => {
+                let Some(current) = self.views.get(index).and_then(|v| v.content.draft.as_ref()) else { return };
+                if index != view
+                    || current.page != before.page
+                    || current.index != before.index
+                    || current.text != before.text
+                    || current.style != before.style
+                {
+                    return;
+                }
+                self.restyle_draft(index, *after);
+            }
             FontSelection::Added { before, after, selected } => {
                 let after = *after;
                 if self.views.get(view).is_none_or(|v| v.content.selected != selected || v.line_editor.is_some()) {
@@ -87,6 +100,15 @@ impl PdfCraftApp {
                 }
             }
         }
+    }
+
+    pub(crate) fn defer_draft_font(&mut self, view: usize, before: &crate::content_ui::TextDraft, after: &AddedText) -> bool {
+        let FontFamily::Packaged(index) = after.family else { return false };
+        if before.style.family == after.family || pdfcraft_fonts::CRAFT_FONTS.get(index).is_none_or(|face| face.is_loaded()) {
+            return false;
+        }
+        self.choose_packaged_font(index, FontSelection::Draft { view, before: Box::new(before.clone()), after: Box::new(after.clone()) });
+        true
     }
 
     pub(crate) fn defer_added_font(&mut self, before: &AddedText, after: &AddedText, selected: Option<(usize, usize)>) -> bool {
@@ -121,6 +143,33 @@ mod tests {
             result,
         });
         reply
+    }
+
+    #[test]
+    fn a_loaded_font_restyles_only_the_added_text_draft_it_was_chosen_for() {
+        let mut app = app();
+        let before = crate::content_ui::TextDraft {
+            page: 0,
+            index: None,
+            rect: [20.0, 20.0, 200.0, 100.0],
+            text: "draft".into(),
+            style: app.text_style.clone(),
+            focus: true,
+            selection: None,
+            typing_from: None,
+        };
+        app.views[0].content.draft = Some(before.clone());
+        let selection = || FontSelection::Draft {
+            view: 0,
+            before: Box::new(before.clone()),
+            after: Box::new(AddedText { family: FontFamily::Times, ..before.style.clone() }),
+        };
+        app.apply_font_selection(selection());
+        assert_eq!(app.views[0].content.draft.as_ref().unwrap().style.family, FontFamily::Times);
+        app.views[0].content.draft = Some(crate::content_ui::TextDraft { text: "newer typing".into(), ..before.clone() });
+        app.apply_font_selection(selection());
+        assert_eq!(app.views[0].content.draft.as_ref().unwrap().style.family, FontFamily::Helvetica);
+        assert_eq!(app.views[0].content.draft.as_ref().unwrap().text, "newer typing");
     }
 
     #[test]

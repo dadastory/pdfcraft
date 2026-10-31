@@ -41,21 +41,30 @@ impl ShapedScript {
 }
 
 fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)> {
-    static FACE: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
-    static HEBREW: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
-    static THAI: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
+    static FACE: OnceLock<(FontRef<'static>, ShaperData)> = OnceLock::new();
+    static HEBREW: OnceLock<(FontRef<'static>, ShaperData)> = OnceLock::new();
+    static THAI: OnceLock<(FontRef<'static>, ShaperData)> = OnceLock::new();
     let cache = match script {
         ShapedScript::Arabic => &FACE,
         ShapedScript::Hebrew => &HEBREW,
         ShapedScript::Thai => &THAI,
     };
-    cache
-        .get_or_init(|| {
-            let font = FontRef::new(script.font()?.data()).ok()?;
-            let data = ShaperData::new(&font);
-            Some((font, data))
-        })
-        .as_ref()
+    cache.get().or_else(|| loaded_face(cache, script.font()))
+}
+
+/// NoFont is transient for demand-loaded programs, so only a valid immutable face is cached.
+fn loaded_face<'a>(
+    cache: &'a OnceLock<(FontRef<'static>, ShaperData)>,
+    program: Option<&'static crate::CraftFont>,
+) -> Option<&'a (FontRef<'static>, ShaperData)> {
+    if let Some(face) = cache.get() {
+        return Some(face);
+    }
+    let font = FontRef::new(program?.data()).ok()?;
+    Some(cache.get_or_init(|| {
+        let data = ShaperData::new(&font);
+        (font, data)
+    }))
 }
 
 /// Whether the Arabic document face has a glyph for `c` (false without the face).
@@ -167,6 +176,21 @@ pub fn shaped_glyph(script: ShapedScript, id: u32) -> Result<GlyphOutline, Glyph
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_font_does_not_prevent_a_later_loaded_face_from_shaping() {
+        static FONT: crate::CraftFont =
+            crate::CraftFont::embedded("Inter", "Regular", &["Latn"], include_bytes!("../../../assets/fonts/Inter-Regular.ttf"));
+        let cache = OnceLock::new();
+        assert!(loaded_face(&cache, None).is_none());
+        let (font, data) = loaded_face(&cache, Some(&FONT)).unwrap();
+        let mut buffer = UnicodeBuffer::new();
+        buffer.push_str("late font");
+        buffer.set_direction(Direction::LeftToRight);
+        let shaped = data.shaper(font).build().shape(buffer, ShapeOptions::new());
+        assert!(shaped.glyph_infos().iter().all(|glyph| glyph.glyph_id != 0));
+        assert!(!shaped.glyph_infos().is_empty());
+    }
 
     fn face_or_skip() -> bool {
         if crate::document_arabic_font().is_none() {

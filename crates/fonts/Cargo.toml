@@ -19,3 +19,7 @@ sha2 = "0.11"
 
 [build-dependencies]
 serde_json = "1"
+
+[dev-dependencies]
+# Upstream build-input tests include build.rs, including the served-catalog parser.
+serde_json = { workspace = true }
