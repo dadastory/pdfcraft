@@ -1,6 +1,6 @@
 // ── built-in functions ──────────────────────────────────────────────────────────────────────
 
-/// `NaiveDate::num_days_from_ce` of 1900-01-01 minus one: a civil date's day count rebased so
+/// `Date::num_days_from_ce` of 1900-01-01 minus one: a civil date's day count rebased so
 /// that 1900-01-01 is FormCalc day 1 (and 1970-01-01 is day 25_568).
 const FORMCALC_EPOCH_FROM_CE: i64 = 693_595;
 
@@ -9,37 +9,35 @@ const DAYS_PER_400_YEARS: i64 = 146_097;
 
 /// Days from 1900-01-01 (day 1, as FormCalc counts) to a civil date.
 ///
-/// chrono's `NaiveDate` stops near ±262143, but FormCalc accepts day numbers up to `MAX_DAYS`
-/// (years past 270000). The calendar repeats every 400 years, so chrono converts the date
+/// time's `Date` stops near ±999999, but FormCalc accepts day numbers up to `MAX_DAYS`
+/// (years past 270000). The calendar repeats every 400 years, so time converts the date
 /// within its cycle and whole cycles are added back; the result matches the proleptic Gregorian
 /// count for every year. Callers pass dates `parse_date`/`civil_from_days` already validated;
 /// anything else reads as 0.
 pub(super) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    use chrono::Datelike;
     let (cycles, year) = (i128::from(y.div_euclid(400)), y.rem_euclid(400));
     i32::try_from(year)
         .ok()
-        .and_then(|year| chrono::NaiveDate::from_ymd_opt(year, m, d))
+        .and_then(|year| (|| time::Date::from_calendar_date(year, time::Month::try_from(u8::try_from(m).ok()?).ok()?, u8::try_from(d).ok()?).ok())())
         .and_then(|date| {
-            let days = i128::from(date.num_days_from_ce()) - i128::from(FORMCALC_EPOCH_FROM_CE) + cycles * i128::from(DAYS_PER_400_YEARS);
+            let days = i128::from(date.to_julian_day() - 1_721_425) - i128::from(FORMCALC_EPOCH_FROM_CE) + cycles * i128::from(DAYS_PER_400_YEARS);
             i64::try_from(days).ok()
         })
         .unwrap_or(0)
 }
 
 /// The civil date (year, month, day) at FormCalc day number `n` (day 1 is 1900-01-01), for any
-/// `n`: chrono converts the day within its 400-year cycle and the cycles are added back as years.
+/// `n`: time converts the day within its 400-year cycle and the cycles are added back as years.
 pub(super) fn civil_from_days(n: i64) -> (i64, u32, u32) {
-    use chrono::Datelike;
     // Days since CE day 0 (0000-12-31), in i128 so no `n` overflows.
     let from_ce = i128::from(n) + i128::from(FORMCALC_EPOCH_FROM_CE);
     let (cycles, rest) = (from_ce.div_euclid(i128::from(DAYS_PER_400_YEARS)), from_ce.rem_euclid(i128::from(DAYS_PER_400_YEARS)));
     // `rest` is 0..146_097, so CE day `rest` lies in years 0..=400 (day 0 is 0000-12-31).
-    let date = i32::try_from(rest).ok().and_then(chrono::NaiveDate::from_num_days_from_ce_opt);
+    let date = i32::try_from(rest).ok().and_then(|day| time::Date::from_julian_day(day + 1_721_425).ok());
     match date {
         Some(date) => {
             let y = i128::from(date.year()) + cycles * 400;
-            (i64::try_from(y).unwrap_or(if y < 0 { i64::MIN } else { i64::MAX }), date.month(), date.day())
+            (i64::try_from(y).unwrap_or(if y < 0 { i64::MIN } else { i64::MAX }), u32::from(date.month() as u8), u32::from(date.day()))
         }
         // Unreachable: every `rest` in 0..146_097 is a valid CE day.
         None => (1900, 1, 1),
@@ -49,7 +47,15 @@ pub(super) fn civil_from_days(n: i64) -> (i64, u32, u32) {
 /// Day numbers (and years) beyond this are refused rather than computed.
 pub(super) const MAX_DAYS: f64 = 1e8;
 
+/// The century split of a two-digit year (`YY`), XFA picture clauses' default: `00` to `29` are
+/// 2000 to 2029 and `30` to `99` are 1930 to 1999 (XFA 3.3, chapter 26, Picture Clause Reference,
+/// p. 1171, which makes 30 the default and lets the century split be set otherwise).
+const CENTURY_SPLIT: i64 = 30;
+
 const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/// Characters of the longest month name: all a month token needs to read of the text.
+const LONGEST_MONTH: usize = 9;
 
 /// Parse `text` as a date by `picture` (`YYYY-MM-DD`, `MM/DD/YYYY`, `MMM D, YYYY`, …).
 pub(super) fn parse_date(text: &str, picture: &str) -> Option<(i64, u32, u32)> {
@@ -66,8 +72,9 @@ pub(super) fn parse_date(text: &str, picture: &str) -> Option<(i64, u32, u32)> {
             }
             i += run;
             if c == 'M' && run >= 3 {
-                // Month name.
-                let rest: String = txt.get(j..).unwrap_or(&[]).iter().collect();
+                // Month name: only as much of the text as a name can be, so a picture of many
+                // month tokens does not copy the rest of a long text for each of them.
+                let rest: String = txt.get(j..).unwrap_or(&[]).iter().take(LONGEST_MONTH).collect();
                 let lower = rest.to_ascii_lowercase();
                 let found = MONTHS
                     .iter()
@@ -89,7 +96,7 @@ pub(super) fn parse_date(text: &str, picture: &str) -> Option<(i64, u32, u32)> {
             }
             let v: i64 = digits.parse().ok()?;
             match c {
-                'Y' => y = Some(if run <= 2 { if v < 50 { 2000 + v } else { 1900 + v } } else { v }),
+                'Y' => y = Some(if run <= 2 { if v < CENTURY_SPLIT { 2000 + v } else { 1900 + v } } else { v }),
                 'M' => m = Some(v as u32),
                 _ => d = Some(v as u32),
             }
@@ -107,15 +114,19 @@ pub(super) fn parse_date(text: &str, picture: &str) -> Option<(i64, u32, u32)> {
 
 /// Number of days in month `m` (1-12) of year `y`, leap years included.
 pub(crate) fn days_in(y: i64, m: u32) -> u32 {
-    // The length of the month from chrono (the first of the next month, less the first of this
+    // The length of the month from time (the first of the next month, less the first of this
     // one). An invalid month keeps the old 31-day default.
     // Month lengths repeat every 400 years, so the year within its cycle is enough (and always
-    // in chrono's range, whatever `y` is).
+    // in time's range, whatever `y` is).
     let y = y.rem_euclid(400);
-    let first = |y: i64, m: u32| i32::try_from(y).ok().and_then(|y| chrono::NaiveDate::from_ymd_opt(y, m, 1));
+    let first = |y: i64, m: u32| {
+        i32::try_from(y)
+            .ok()
+            .and_then(|y| (|| time::Date::from_calendar_date(y, time::Month::try_from(u8::try_from(m).ok()?).ok()?, u8::try_from(1).ok()?).ok())())
+    };
     let next = if m == 12 { first(y + 1, 1) } else { first(y, m + 1) };
     match (first(y, m), next) {
-        (Some(a), Some(b)) => (b - a).num_days() as u32,
+        (Some(a), Some(b)) => (b - a).whole_days() as u32,
         _ => 31,
     }
 }

@@ -55,6 +55,7 @@ pub(super) fn edit_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g
     // Format text at the top while text is selected or being added.
     format_section(app, ui, t);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        super::tools::clear_of_scrollbar(ui);
         widgets::section_title(ui, tl!("Modify page"));
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -185,6 +186,7 @@ pub(super) fn stamp_palette(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens
     use pdfcraft_engine::{StampGroup, StampKind};
     ui.label(egui::RichText::new(tl!("Choose a stamp, then click on the page to place it.")).small().color(t.text_faint));
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        super::tools::clear_of_scrollbar(ui);
         for (group, title) in [
             (StampGroup::Dynamic, tl!("Dynamic")),
             (StampGroup::SignHere, tl!("Sign Here")),
@@ -267,13 +269,29 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             .map(|f| (f.resource, f.face))
             .collect();
         sources.extend(pdfcraft_fonts::CRAFT_FONTS.iter().map(|face| (pdfcraft_fonts::embedding::packaged_resource(face), face.name())));
-        let shown = ed.font_shown(&sources);
+        let fmt = ed.selection_formatting(&sources);
+        ed.sync_selection_look(&fmt);
+        let shown = fmt.font_shown;
+        let mixed_size = fmt.size.is_none();
         // A selection aligns the rows it touches; the caret alone, the whole paragraph.
         let paragraphs = crate::format_text_ui::Paragraphs { text: &ed.text, selection: ed.selection.clone(), tidy: false };
-        let out = crate::format_text_ui::panel(ui, t, &mut ed.look, Some(&mut ed.extras), Fonts { sources: Some(&sources), shown }, Some(paragraphs));
+        let out = crate::format_text_ui::panel(
+            ui,
+            t,
+            &mut ed.look,
+            Some(&mut ed.extras),
+            Fonts { sources: Some(&sources), shown, mixed_size },
+            Some(paragraphs),
+        );
+        if out.size_committed {
+            ed.choose_size(ed.look.size);
+        }
         let mut changed = out.changed;
         if out.font.is_some() {
             app.pending_font = None;
+        }
+        if let Some(script) = out.script {
+            changed |= crate::edit_text_ui::toggle_script(&mut ed.text, &mut ed.selection, script);
         }
         match out.font {
             Some(FontChoice::KeepSource) => {
@@ -320,7 +338,14 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
         }
         let mut style = draft.style.clone();
         let paragraphs = crate::format_text_ui::Paragraphs { text: &draft.text, selection: draft.selection.clone(), tidy: true };
-        if added_text_format(ui, t, &mut style, Some(paragraphs)) {
+        let out = added_text_format(ui, t, &mut style, Some(paragraphs));
+        if let Some(script) = out.script {
+            let mut toggled = draft.clone();
+            if crate::edit_text_ui::toggle_script(&mut toggled.text, &mut toggled.selection, script) {
+                app.views[i].content.draft = Some(toggled);
+            }
+        }
+        if out.font.is_some() {
             app.pending_font = None;
         }
         if app.defer_draft_font(i, &draft, &style) {
@@ -363,7 +388,7 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     match selected {
         Some((page, index, text)) => {
             let mut style = text.clone();
-            if added_text_format(ui, t, &mut style, None) {
+            if added_text_format(ui, t, &mut style, None).font.is_some() {
                 app.pending_font = None;
             }
             if app.defer_added_font(&text, &style, Some((page, index))) {
@@ -379,7 +404,7 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
         None if app.quick_tool == crate::QuickTool::AddText => {
             crate::content_ui::hint(ui, t);
             let mut style = app.text_style.clone();
-            if added_text_format(ui, t, &mut style, None) {
+            if added_text_format(ui, t, &mut style, None).font.is_some() {
                 app.pending_font = None;
             }
             if app.defer_added_font(&app.text_style.clone(), &style, None) {
@@ -398,18 +423,17 @@ fn added_text_format(
     t: &Tokens,
     style: &mut pdfcraft_engine::AddedText,
     paragraphs: Option<crate::format_text_ui::Paragraphs>,
-) -> bool {
+) -> crate::format_text_ui::Outcome {
     let shown = style.family.label().to_string();
-    let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown }, paragraphs);
+    let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown, mixed_size: false }, paragraphs);
     if let Some(crate::format_text_ui::FontChoice::Family(family)) = out.font {
         style.family = family;
         if matches!(family, pdfcraft_engine::FontFamily::Packaged(_)) {
             style.bold = false;
             style.italic = false;
         }
-        return true;
     }
-    false
+    out
 }
 
 impl PdfCraftApp {
@@ -417,7 +441,11 @@ impl PdfCraftApp {
     /// style at once and stays open. Text already on the page is updated with what has been typed,
     /// as one undoable change; new text waits until it is finished. Text typed after this styling
     /// starts from it too.
-    pub(crate) fn restyle_draft(&mut self, index: usize, style: pdfcraft_engine::AddedText) {
+    pub(crate) fn restyle_draft(&mut self, index: usize, mut style: pdfcraft_engine::AddedText) {
+        // A gray or CMYK ink the colour no longer shows goes now (#6440): kept, the draft would
+        // differ from the item the page reads back without it, and a later pick of the ink's
+        // look would bring it back.
+        style.drop_stale_ink();
         let Some(view) = self.views.get_mut(index) else { return };
         // Text the standard fonts can't draw stays in the box, unwritten, until it is corrected (#125).
         let blocked = view.content.blocked().is_some();

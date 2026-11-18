@@ -13,11 +13,13 @@ workspace = true
 [dependencies]
 pdfcraft-cos = { workspace = true }
 pdfcraft-annot = { workspace = true }
+pdfcraft-content = { workspace = true }
 pdfcraft-fonts = { workspace = true }
 pdfcraft-model = { workspace = true }
 thiserror.workspace = true
-# ASN.1 UTCTime/GeneralizedTime conversion goes through chrono (no hand-rolled calendar code).
-chrono = { workspace = true }
+zeroize.workspace = true
+# ASN.1 UTCTime/GeneralizedTime conversion goes through time (no hand-rolled calendar code).
+time = { workspace = true }
 base64 = "0.23"
 sha1 = "0.11"
 sha2 = "0.11"
@@ -30,7 +32,7 @@ bp384 = { version = "0.14", default-features = false, features = ["arithmetic", 
 ecdsa = { version = "0.17", default-features = false, features = ["algorithm", "der"] }
 # Verification only on native targets (RSA private-key operations use aws-lc-rs, ADR-0009).
 crypto-bigint = { version = "0.7", default-features = false, features = ["alloc"] }
-rsa = { version = "=0.10.0-rc.18", default-features = false, features = ["std", "hazmat"] }
+rsa = { version = "=0.10.0", default-features = false, features = ["std", "hazmat"] }
 pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 hmac = "0.13"
 aes = "0.9"
@@ -40,6 +42,9 @@ rc2 = "0.9"
 sha3 = "0.12.0"
 ripemd = "0.2.0"
 ed25519-dalek = "3.0.0"
+
+[dev-dependencies]
+pdfcraft-testkit = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }

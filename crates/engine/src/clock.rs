@@ -1,7 +1,7 @@
 /// Seconds to add to UTC for local time (0 where unknown).
 pub(crate) fn local_utc_offset() -> i64 {
     #[cfg(not(target_arch = "wasm32"))]
-    return i64::from(chrono::Local::now().offset().local_minus_utc());
+    return i64::from(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC).whole_seconds());
     #[cfg(target_arch = "wasm32")]
     return 0;
 }

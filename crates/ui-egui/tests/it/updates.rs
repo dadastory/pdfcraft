@@ -37,7 +37,7 @@ fn settle(h: &mut Harness<'static, PdfCraftApp>) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         h.run_steps(2);
-        if h.query_by_label_contains("Checking for a newer version").is_none() {
+        if h.query_by_label_contains("Checking for updates").is_none() {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "timed out waiting for the update check");
